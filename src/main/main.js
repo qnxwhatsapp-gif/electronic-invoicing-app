@@ -2,6 +2,9 @@ const { app, BrowserWindow } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const isDev = process.env.NODE_ENV !== 'production';
+const REMOTE_API_BASE_URL =
+  process.env.ELECTRON_API_BASE_URL || 'https://invoicing-app-server-production.up.railway.app/api';
+const USE_REMOTE_API = Boolean(REMOTE_API_BASE_URL);
 
 let mainWindow;
 let serverProcess;
@@ -61,8 +64,12 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   require('./electronHandlers')();
-  startServer();
-  await waitForServer();
+  if (!USE_REMOTE_API) {
+    startServer();
+    await waitForServer();
+  } else {
+    console.log('[main] Using remote API:', REMOTE_API_BASE_URL);
+  }
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
