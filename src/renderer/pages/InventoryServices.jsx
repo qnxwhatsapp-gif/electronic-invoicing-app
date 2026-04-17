@@ -193,6 +193,7 @@ export default function InventoryServices() {
   const [selectedBranch, setSelectedBranch] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [editProduct, setEditProduct] = useState(null);
+  const [showImportHelper, setShowImportHelper] = useState(false);
   const { can } = useAuth();
 
   useEffect(() => { loadAll(); }, [search, catFilter, statusFilter, selectedBranch]);
@@ -215,28 +216,7 @@ export default function InventoryServices() {
       const filePath = await window.electron.invoke('products:chooseImportFile');
       if (!filePath) return;
 
-      let rows = [];
-      if (filePath.endsWith('.csv')) {
-        const fs = window.require ? window.require('fs') : null;
-        if (fs) {
-          const content = fs.readFileSync(filePath, 'utf8');
-          const lines = content.split('\n').filter(l => l.trim());
-          const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-          rows = lines.slice(1).map(line => {
-            const vals = line.split(',').map(v => v.trim().replace(/"/g, ''));
-            const obj = {};
-            headers.forEach((h, i) => { obj[h] = vals[i] || ''; });
-            return obj;
-          });
-        }
-      } else {
-        const XLSX = window.require ? window.require('xlsx') : null;
-        if (XLSX) {
-          const wb = XLSX.readFile(filePath);
-          const ws = wb.Sheets[wb.SheetNames[0]];
-          rows = XLSX.utils.sheet_to_json(ws);
-        }
-      }
+      const rows = await window.electron.invoke('products:parseImportFile', { filePath });
 
       if (rows.length === 0) { toast.error('No data found in file'); return; }
       const result = await window.electron.invoke('products:importCSV', { rows });
@@ -269,6 +249,58 @@ export default function InventoryServices() {
     }
   }
 
+  async function downloadImportTemplate(format) {
+    const headers = ['name', 'category', 'purchase_price', 'selling_price', 'current_stock', 'reorder_level', 'barcode', 'unit', 'hsn_code'];
+    const sampleRow = {
+      name: 'Sample LED Bulb 9W',
+      category: 'LED & Lighting',
+      purchase_price: 120,
+      selling_price: 140,
+      current_stock: 50,
+      reorder_level: 10,
+      barcode: '85395000123',
+      unit: 'pcs',
+      hsn_code: '85395000',
+    };
+
+    try {
+      const fileNameByFormat = {
+        csv: 'products_import_template.csv',
+        xlsx: 'products_import_template.xlsx',
+        json: 'products_import_template.json',
+      };
+      const fileName = fileNameByFormat[format] || fileNameByFormat.csv;
+      let blob;
+      if (format === 'csv') {
+        const csvLine = headers.map(h => sampleRow[h]).join(',');
+        blob = new Blob([`${headers.join(',')}\n${csvLine}\n`], { type: 'text/csv;charset=utf-8;' });
+      } else if (format === 'xlsx') {
+        const XLSX = window.require ? window.require('xlsx') : null;
+        if (!XLSX) { toast.error('Excel export not available'); return; }
+        const ws = XLSX.utils.json_to_sheet([sampleRow], { header: headers });
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Template');
+        const xlsxArray = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        blob = new Blob([xlsxArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      } else if (format === 'json') {
+        blob = new Blob([JSON.stringify([sampleRow], null, 2)], { type: 'application/json;charset=utf-8;' });
+      }
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', fileName);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast.success(`Template downloaded (${format.toUpperCase()})`);
+    } catch (e) {
+      toast.error(`Template download failed: ${e.message}`);
+    }
+  }
+
   async function handleDelete(id) {
     if (!window.confirm('Delete this product? This cannot be undone.')) return;
     const result = await window.electron.invoke('products:delete', { id });
@@ -289,25 +321,25 @@ export default function InventoryServices() {
         <div className="page-subtitle">Manage Stock And Products</div>
       </div>
 
-      <div className="stat-cards">
-        <div className="stat-card blue">
+      <div className="stat-cards inventory-stat-cards">
+        <div className="stat-card inventory-stat-card blue">
           <div className="stat-card-label">Total Items</div>
-          <div className="stat-card-value">{stats.total || 0}</div>
+          <div className="stat-card-value inventory-stat-card-value">{stats.total || 0}</div>
           <div className="stat-card-icon">📦</div>
         </div>
-        <div className="stat-card pink">
+        <div className="stat-card inventory-stat-card pink">
           <div className="stat-card-label">Low Stock Alert</div>
-          <div className="stat-card-value">{stats.lowAlert || 0}</div>
+          <div className="stat-card-value inventory-stat-card-value">{stats.lowAlert || 0}</div>
           <div className="stat-card-icon">⚠️</div>
         </div>
-        <div className="stat-card yellow">
+        <div className="stat-card inventory-stat-card yellow">
           <div className="stat-card-label">Stock Value (Cost)</div>
-          <div className="stat-card-value">₹{(stats.costVal || 0).toLocaleString()}</div>
+          <div className="stat-card-value inventory-stat-card-value">₹{(stats.costVal || 0).toLocaleString()}</div>
           <div className="stat-card-icon">💵</div>
         </div>
-        <div className="stat-card green">
+        <div className="stat-card inventory-stat-card green">
           <div className="stat-card-label">Stock Value (Selling)</div>
-          <div className="stat-card-value">₹{(stats.sellVal || 0).toLocaleString()}</div>
+          <div className="stat-card-value inventory-stat-card-value">₹{(stats.sellVal || 0).toLocaleString()}</div>
           <div className="stat-card-icon">📈</div>
         </div>
       </div>
@@ -330,7 +362,7 @@ export default function InventoryServices() {
         </select>
         {can('inventory', 'create') && (
           <>
-            <button className="btn btn-outline filters-bar-right" onClick={handleImportCSV} style={{ marginRight: 8 }}>⬆ Import CSV</button>
+            <button className="btn btn-outline filters-bar-right" onClick={() => setShowImportHelper(true)} style={{ marginRight: 8 }}>⬆ Import Data</button>
             <button className="btn btn-outline filters-bar-right" onClick={handleExportExcel} style={{ marginRight: 8 }}>⬇ Export</button>
             <button className="btn btn-black filters-bar-right" onClick={openAdd}>+ Add Item</button>
           </>
@@ -381,6 +413,31 @@ export default function InventoryServices() {
           onClose={() => setShowModal(false)}
           onSaved={loadAll}
         />
+      )}
+
+      {showImportHelper && (
+        <div className="modal-overlay" onClick={() => setShowImportHelper(false)}>
+          <div className="modal-card modal-sm" onClick={e => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowImportHelper(false)}>✕</button>
+            <div className="modal-title">Import Products</div>
+            <div className="modal-subtitle">Download a template first, then upload your completed file.</div>
+
+            <div style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button className="btn btn-outline" onClick={() => downloadImportTemplate('csv')}>Download CSV Template</button>
+              <button className="btn btn-outline" onClick={() => downloadImportTemplate('xlsx')}>Download Excel Template (.xlsx)</button>
+              <button className="btn btn-outline" onClick={() => downloadImportTemplate('json')}>Download Other Template (.json)</button>
+            </div>
+
+            <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 16 }}>
+              Required columns: <code>name, category, purchase_price, selling_price, current_stock, reorder_level, barcode, unit, hsn_code</code>
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowImportHelper(false)}>Cancel</button>
+              <button className="btn btn-black" onClick={() => { setShowImportHelper(false); handleImportCSV(); }}>Upload File</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

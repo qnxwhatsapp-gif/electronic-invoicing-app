@@ -228,8 +228,10 @@ function UserManagement() {
   const [allRoles, setAllRoles] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [showPerms, setShowPerms] = useState(null);
+  const [showPasswordModal, setShowPasswordModal] = useState(null);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name:'', mobile:'', email:'', password:'', role:'', branch_id:'' });
+  const [passwordForm, setPasswordForm] = useState({ password:'', confirmPassword:'' });
   const [permsMap, setPermsMap] = useState({});
   const { currentUser } = useAuth();
 
@@ -269,6 +271,33 @@ function UserManagement() {
   async function toggleActive(user) {
     await window.electron.invoke('users:toggleActive', { id: user.id, is_active: user.is_active ? 0 : 1 });
     window.electron.invoke('users:getAll').then(setUsers);
+  }
+
+  function openPasswordModal(user) {
+    setShowPasswordModal(user);
+    setPasswordForm({ password:'', confirmPassword:'' });
+  }
+
+  async function updatePassword() {
+    if (!passwordForm.password || passwordForm.password.length < 8) {
+      toast.error('Password must be at least 8 characters');
+      return;
+    }
+    if (passwordForm.password !== passwordForm.confirmPassword) {
+      toast.error('Passwords do not match');
+      return;
+    }
+    const result = await window.electron.invoke('users:updatePassword', {
+      id: showPasswordModal.id,
+      password: passwordForm.password,
+    });
+    if (result?.success) {
+      toast.success('Password updated successfully');
+      setShowPasswordModal(null);
+      setPasswordForm({ password:'', confirmPassword:'' });
+    } else {
+      toast.error(result?.error || 'Failed to update password');
+    }
   }
 
   async function openPerms(user) {
@@ -323,6 +352,7 @@ function UserManagement() {
               </td>
               <td style={{ display:'flex', gap:8 }}>
                 {currentUser?.role === 'Owner' && <button className="btn btn-outline btn-sm" onClick={() => openPerms(u)} title="Edit Permissions">🔑</button>}
+                {currentUser?.role === 'Owner' && <button className="btn btn-outline btn-sm" title="Update Password" onClick={() => openPasswordModal(u)}>🔒</button>}
                 <button className="btn btn-outline btn-sm" title="Edit" onClick={() => openEdit(u)}>✏️</button>
               </td>
             </tr>
@@ -353,6 +383,41 @@ function UserManagement() {
 
       {/* Permissions Modal */}
       {showPerms && <PermissionsModal user={showPerms} permsMap={permsMap} onToggle={togglePerm} onSave={savePerms} onReset={async () => { await window.electron.invoke('permissions:saveForUser',{userId:showPerms.id,permissions:{}}); setShowPerms(null); toast.success('Reset to role defaults'); }} onClose={() => setShowPerms(null)} />}
+
+      {/* Update Password Modal */}
+      {showPasswordModal && (
+        <div className="modal-overlay" onClick={() => setShowPasswordModal(null)}>
+          <div className="modal-card modal-sm" onClick={e => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowPasswordModal(null)}>✕</button>
+            <div className="modal-title">Update Password</div>
+            <div className="modal-subtitle">Set a new password for {showPasswordModal.name}</div>
+            <div className="form-group">
+              <label className="form-label">New Password *</label>
+              <input
+                type="password"
+                className="form-input"
+                placeholder="Minimum 8 characters"
+                value={passwordForm.password}
+                onChange={e => setPasswordForm(p => ({ ...p, password: e.target.value }))}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Confirm Password *</label>
+              <input
+                type="password"
+                className="form-input"
+                placeholder="Re-enter new password"
+                value={passwordForm.confirmPassword}
+                onChange={e => setPasswordForm(p => ({ ...p, confirmPassword: e.target.value }))}
+              />
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowPasswordModal(null)}>Cancel</button>
+              <button className="btn btn-black" onClick={updatePassword}>Update Password</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* User Types Manager */}
       <UserTypesManager onRolesChanged={loadAll} />
@@ -872,7 +937,7 @@ function CurrencyLanguage() {
         <div>
           <label className="form-label">Currency</label>
           <select className="form-select" value={settings.currency} onChange={e => {
-            const symbolMap = { INR:'₹', USD:'$', EUR:'€', GBP:'£', AED:'د.إ', ZAR:'R' };
+            const symbolMap = { INR:'₹', USD:'$', EUR:'€', GBP:'£', AED:'د.إ', ZAR:'R', XOF:'CFA', XAF:'FCFA' };
             setSettings(p => ({...p, currency:e.target.value, currency_symbol: symbolMap[e.target.value] || p.currency_symbol }));
           }}>
             <option value="INR">INR — Indian Rupee (₹)</option>
@@ -881,6 +946,8 @@ function CurrencyLanguage() {
             <option value="GBP">GBP — British Pound (£)</option>
             <option value="AED">AED — UAE Dirham (د.إ)</option>
             <option value="ZAR">ZAR — South African Rand (R)</option>
+            <option value="XOF">XOF — South Africa CFA Franc (CFA)</option>
+            <option value="XAF">XAF — Central African CFA Franc (FCFA)</option>
           </select>
         </div>
         <div>
@@ -893,6 +960,9 @@ function CurrencyLanguage() {
             <optgroup label="English">
               <option value="en">English</option>
               <option value="en-ZA">English (South Africa)</option>
+            </optgroup>
+            <optgroup label="French">
+              <option value="fr">French (Francais)</option>
             </optgroup>
             <optgroup label="South African Languages">
               <option value="af">Afrikaans</option>

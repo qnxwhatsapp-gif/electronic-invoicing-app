@@ -108,12 +108,59 @@ Add Excel export to the Sales Report per SKILL.md Section 21.
 
 ---
 
+## 🤖 Cursor Skill: `/init`
+
+This repository now includes a project skill at:
+
+`.cursor/skills/init/SKILL.md`
+
+Use `/init` in Cursor chat when you want the agent to:
+
+- understand the project architecture before editing
+- create or refine project skills under `.cursor/skills/`
+- update `README.md` so docs match the current codebase
+- report mismatches between implementation and documentation
+
+Typical workflow:
+
+```text
+/init
+Then: "add feature X and keep docs in sync"
+```
+
+---
+
 ## 📊 Database Location
 
 SQLite DB is stored at:
 - **Windows:** `%APPDATA%\electronic-invoicing-app\invoicing.db`
 - **Mac:** `~/Library/Application Support/electronic-invoicing-app/invoicing.db`
 - **Linux:** `~/.config/electronic-invoicing-app/invoicing.db`
+
+### Migration to Server API + PostgreSQL
+
+For migration planning and execution details, see:
+
+- `DB_MIGRATION_POSTGRES_API.md`
+- PostgreSQL starter schema: `server/schema.sql`
+- SQLite export script: `scripts/export-sqlite.js`
+- PostgreSQL import script: `scripts/import-postgres.js`
+
+Example export command:
+
+```bash
+npm run db:export:sqlite
+```
+
+Example import command:
+
+```bash
+# Set your postgres URL first
+# Windows (PowerShell):
+$env:DATABASE_URL="postgresql://user:password@localhost:5432/invoicing"
+
+npm run db:import:postgres -- --dir "./exports/sqlite-export-<timestamp>"
+```
 
 ---
 

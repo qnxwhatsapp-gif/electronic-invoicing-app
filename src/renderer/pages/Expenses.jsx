@@ -45,11 +45,11 @@ export default function Expenses() {
         <div className="page-subtitle">Track And Manage Business Expenses</div>
       </div>
 
-      <div className="stat-cards">
-        <div className="stat-card blue"><div className="stat-card-label">Total Expenses (This Month)</div><div className="stat-card-value">${stats.total?.toLocaleString()}</div><div className="stat-card-icon">💳</div></div>
-        <div className="stat-card pink"><div className="stat-card-label">Rent</div><div className="stat-card-value">${getVal('Rent & Office').toLocaleString()}</div><div className="stat-card-icon">🏢</div></div>
-        <div className="stat-card yellow"><div className="stat-card-label">Electricity</div><div className="stat-card-value">${getVal('Utilities').toLocaleString()}</div><div className="stat-card-icon">⚡</div></div>
-        <div className="stat-card green"><div className="stat-card-label">Salary</div><div className="stat-card-value">${getVal('Payroll & Salary').toLocaleString()}</div><div className="stat-card-icon">💼</div></div>
+      <div className="stat-cards expenses-stat-cards">
+        <div className="stat-card expenses-stat-card blue"><div className="stat-card-label">Total Expenses (This Month)</div><div className="stat-card-value expenses-stat-card-value">${stats.total?.toLocaleString()}</div><div className="stat-card-icon">💳</div></div>
+        <div className="stat-card expenses-stat-card pink"><div className="stat-card-label">Rent</div><div className="stat-card-value expenses-stat-card-value">${getVal('Rent & Office').toLocaleString()}</div><div className="stat-card-icon">🏢</div></div>
+        <div className="stat-card expenses-stat-card yellow"><div className="stat-card-label">Electricity</div><div className="stat-card-value expenses-stat-card-value">${getVal('Utilities').toLocaleString()}</div><div className="stat-card-icon">⚡</div></div>
+        <div className="stat-card expenses-stat-card green"><div className="stat-card-label">Salary</div><div className="stat-card-value expenses-stat-card-value">${getVal('Payroll & Salary').toLocaleString()}</div><div className="stat-card-icon">💼</div></div>
       </div>
 
       <div style={{ display:'grid', gridTemplateColumns:'1fr 300px', gap:20 }}>

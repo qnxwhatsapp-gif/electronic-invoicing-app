@@ -13,7 +13,9 @@
     "build": "npm run react-build && electron-builder",
     "build:msi": "npm run react-build && electron-builder --win msi --x64",
     "postinstall": "electron-builder install-app-deps",
-    "seed": "node src/main/seed.js"
+    "seed": "node src/main/seed.js",
+    "db:export:sqlite": "node scripts/export-sqlite.js",
+    "db:import:postgres": "node scripts/import-postgres.js"
   },
   "dependencies": {
     "@zxing/browser": "^0.1.5",
@@ -23,6 +25,7 @@
     "jspdf": "^2.5.1",
     "jspdf-autotable": "^3.8.2",
     "lucide-react": "^0.363.0",
+    "pg": "^8.20.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hot-toast": "^2.4.1",
@@ -65,7 +68,9 @@
       "target": [
         {
           "target": "msi",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico",

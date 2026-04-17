@@ -43,6 +43,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .stat-card-trend.up { color: #16a34a; }
 .stat-card-trend.down { color: #dc2626; }
 .stat-card-icon { position: absolute; top: 18px; right: 18px; font-size: 22px; color: #6b7280; }
+.inventory-stat-cards { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.inventory-stat-card { padding: 16px 14px; min-height: 108px; border-radius: 12px; }
+.inventory-stat-card-value { font-size: 22px; margin: 8px 0 4px; }
+.reports-stat-cards { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.expenses-stat-cards { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.expenses-stat-card { padding: 16px 14px; min-height: 108px; border-radius: 12px; }
+.expenses-stat-card-value { font-size: 22px; margin: 8px 0 4px; }
 
 /* Tables */
 .data-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; }

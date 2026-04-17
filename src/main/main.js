@@ -27,7 +27,9 @@ function createWindow() {
   mainWindow.loadURL(startURL);
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
-  if (isDev) mainWindow.webContents.openDevTools();
+  if (isDev && process.env.OPEN_DEVTOOLS === '1') {
+    mainWindow.webContents.openDevTools();
+  }
 }
 
 app.whenReady().then(() => {

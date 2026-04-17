@@ -5,8 +5,11 @@ import { useBarcodeGun } from '../hooks/useBarcodeGun';
 import BarcodeScanner from '../components/BarcodeScanner';
 
 // -- Print Invoice ----------------------------------------------------------
-function printInvoice(invoice) {
+async function printInvoice(invoice) {
   if (!invoice) return;
+  const invoiceSettings = await window.electron.invoke('invoiceSettings:get', {}).catch(() => null);
+  const footerNote = invoiceSettings?.footer_notes || '';
+  const termsAndConditions = invoiceSettings?.terms_conditions || '';
   const items = invoice.items || [];
   const rows = items.map((it, i) => `
     <tr>
@@ -87,7 +90,12 @@ function printInvoice(invoice) {
     <div class="totals-row grand"><span>Grand Total</span><span>Rs.${Number(invoice.grand_total).toLocaleString('en-IN',{minimumFractionDigits:2})}</span></div>
   </div>
 
-  ${invoice.internal_notes ? `<div class="footer"><strong>Notes:</strong> ${invoice.internal_notes}</div>` : ''}
+  ${(invoice.internal_notes || footerNote || termsAndConditions) ? `
+  <div class="footer">
+    ${invoice.internal_notes ? `<div><strong>Notes:</strong> ${invoice.internal_notes}</div>` : ''}
+    ${footerNote ? `<div style="margin-top:${invoice.internal_notes ? '8px' : '0'}"><strong>Footer Note:</strong> ${footerNote}</div>` : ''}
+    ${termsAndConditions ? `<div style="margin-top:${(invoice.internal_notes || footerNote) ? '8px' : '0'}"><strong>Terms & Conditions:</strong> ${termsAndConditions}</div>` : ''}
+  </div>` : ''}
   </body></html>`;
 
   const win = window.open('', '_blank', 'width=800,height=700');
@@ -449,12 +457,12 @@ function InvoiceStartModal({ onClose, onNew, onResume }) {
 
 // -- CreateInvoiceForm ------------------------------------------------------
 function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
+  const { currentUser } = useAuth();
   const [products, setProducts] = useState([]);
   const [branches, setBranches] = useState([]);
   const [sellers, setSellers] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
-  const [dueDate, setDueDate] = useState('');
   const [branchId, setBranchId] = useState('');
   const [sellerId, setSellerId] = useState('');
   const [customerName, setCustomerName] = useState('');
@@ -465,8 +473,6 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
   const [suggestions, setSuggestions] = useState([]);
   const [showScanner, setShowScanner] = useState(false);
   const [paymentMode, setPaymentMode] = useState('Cash');
-  const [splitCash, setSplitCash] = useState('');
-  const [splitCard, setSplitCard] = useState('');
   const [isCreditSale, setIsCreditSale] = useState(false);
   const [taxPct, setTaxPct] = useState(0);
   const [discount, setDiscount] = useState(0);
@@ -482,9 +488,8 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
     if (initialDraft && initialDraft.id) {
       setDraftId(initialDraft.id);
       setInvoiceDate(initialDraft.invoice_date || new Date().toISOString().slice(0, 10));
-      setDueDate(initialDraft.due_date || '');
-      setBranchId(initialDraft.branch_id || '');
-      setSellerId(initialDraft.seller_id || '');
+      setBranchId(initialDraft.branch_id ? String(initialDraft.branch_id) : '');
+      setSellerId(initialDraft.seller_id ? String(initialDraft.seller_id) : '');
       setCustomerName(initialDraft.customer_name || '');
       setCustomerPhone(initialDraft.customer_phone || '');
       setCustomerAddress(initialDraft.customer_address || '');
@@ -494,8 +499,12 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
       setDiscount(initialDraft.discount || 0);
       setNotes(initialDraft.notes || '');
       if (Array.isArray(initialDraft.items)) setItems(initialDraft.items);
+    } else {
+      setInvoiceDate(new Date().toISOString().slice(0, 10));
+      if (currentUser?.branch_id) setBranchId(String(currentUser.branch_id));
+      if (currentUser?.id) setSellerId(String(currentUser.id));
     }
-  }, []);
+  }, [initialDraft, currentUser]);
 
   const handleGunScan = useCallback(async (barcode) => {
     const p = await window.electron.invoke('products:findByBarcode', { barcode });
@@ -524,10 +533,13 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
       const idx = prev.findIndex(i => i.product_id === product.id);
       if (idx >= 0) {
         const u = [...prev];
-        u[idx] = { ...u[idx], qty: u[idx].qty + 1, amount: (u[idx].qty + 1) * u[idx].rate };
+        const nextQty = u[idx].qty + 1;
+        const lineBase = nextQty * u[idx].rate;
+        const lineDiscount = (lineBase * (u[idx].discount_pct || 0)) / 100;
+        u[idx] = { ...u[idx], qty: nextQty, amount: lineBase - lineDiscount };
         return u;
       }
-      return [...prev, { product_id: product.id, name: product.name, sku: product.sku, qty: 1, rate: product.selling_price || 0, amount: product.selling_price || 0 }];
+      return [...prev, { product_id: product.id, name: product.name, sku: product.sku, qty: 1, rate: product.selling_price || 0, discount_pct: 0, amount: product.selling_price || 0 }];
     });
     setSearch(''); setSuggestions([]);
   }
@@ -535,10 +547,19 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
   function updateItem(idx, field, val) {
     setItems(prev => {
       const u = [...prev];
-      u[idx] = { ...u[idx], [field]: parseFloat(val) || 0 };
-      u[idx].amount = u[idx].qty * u[idx].rate;
+      const parsed = parseFloat(val) || 0;
+      const safeDiscount = field === 'discount_pct' ? Math.max(0, Math.min(100, parsed)) : (u[idx].discount_pct || 0);
+      u[idx] = { ...u[idx], [field]: parsed, discount_pct: safeDiscount };
+      const lineBase = u[idx].qty * u[idx].rate;
+      const lineDiscount = (lineBase * (u[idx].discount_pct || 0)) / 100;
+      u[idx].amount = lineBase - lineDiscount;
       return u;
     });
+  }
+
+  function getLineDiscountAmount(item) {
+    const base = (item.qty || 0) * (item.rate || 0);
+    return (base * (item.discount_pct || 0)) / 100;
   }
 
   function removeItem(idx) { setItems(prev => prev.filter((_, i) => i !== idx)); }
@@ -547,24 +568,77 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
   const taxAmt = subtotal * (taxPct / 100);
   const grandTotal = subtotal + taxAmt - (parseFloat(discount) || 0);
 
-  async function save(status) {
+  function resetForNewInvoice() {
+    setDraftId(null);
+    setInvoiceDate(new Date().toISOString().slice(0, 10));
+    setBranchId(currentUser?.branch_id ? String(currentUser.branch_id) : '');
+    setSellerId(currentUser?.id ? String(currentUser.id) : '');
+    setCustomerName('');
+    setCustomerPhone('');
+    setCustomerAddress('');
+    setItems([]);
+    setSearch('');
+    setSuggestions([]);
+    setPaymentMode('Cash');
+    setIsCreditSale(false);
+    setTaxPct(0);
+    setDiscount(0);
+    setNotes('');
+  }
+
+  async function save(status, { autoPrint = false, resetToNew = false } = {}) {
     if (items.length === 0) { toast.error('Add at least one item'); return; }
     setSaving(true);
     try {
       const payload = {
-        invoice_date: invoiceDate, due_date: dueDate, branch_id: branchId || null, seller_id: sellerId || null,
+        invoice_date: invoiceDate, branch_id: branchId ? parseInt(branchId, 10) : null, seller_id: sellerId ? parseInt(sellerId, 10) : null,
         customer_name: customerName, customer_phone: customerPhone, customer_address: customerAddress, items,
-        payment_mode: paymentMode, split_cash: splitCash ? parseFloat(splitCash) : null, split_card: splitCard ? parseFloat(splitCard) : null,
+        payment_mode: paymentMode,
         is_credit_sale: isCreditSale ? 1 : 0, tax_pct: taxPct, discount: parseFloat(discount) || 0,
         subtotal, tax_amount: taxAmt, grand_total: grandTotal, notes, status,
       };
       const result = await window.electron.invoke(draftId ? 'invoices:update' : 'invoices:create', draftId ? { id: draftId, data: payload } : payload);
       if (result.success) {
-        toast.success(status === 'Draft' ? 'Saved as draft' : 'Invoice created!');
-        onSaved(); onClose();
+        if (status === 'Draft') {
+          toast.success('Saved as draft');
+          onSaved();
+          onClose();
+          return;
+        }
+
+        if (autoPrint) {
+          const invoiceId = draftId || result.id;
+          if (invoiceId) {
+            const fullInvoice = await window.electron.invoke('invoices:getById', { id: invoiceId });
+            if (fullInvoice) printInvoice(fullInvoice);
+          }
+        }
+
+        toast.success('Invoice created!');
+        onSaved();
+        if (resetToNew) {
+          resetForNewInvoice();
+        } else {
+          onClose();
+        }
       } else { toast.error(result.error || 'Failed to save invoice'); }
     } finally { setSaving(false); }
   }
+
+  function finalizeAndSave() {
+    save(isCreditSale ? 'Credit' : 'Paid', { autoPrint: true, resetToNew: true });
+  }
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        if (!saving) finalizeAndSave();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [saving, isCreditSale, items, invoiceDate, branchId, sellerId, customerName, customerPhone, customerAddress, paymentMode, taxPct, discount, notes, draftId]);
 
   return (
     <div style={{ position:'fixed', inset:0, background:'#fff', zIndex:200, overflowY:'auto', display:'flex', flexDirection:'column' }}>
@@ -576,7 +650,7 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
         </div>
         <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
           <button className="btn btn-outline" onClick={() => save('Draft')} disabled={saving}>Save Draft</button>
-          <button className="btn btn-black" onClick={() => save(isCreditSale ? 'Credit' : 'Paid')} disabled={saving}>
+          <button className="btn btn-black" onClick={finalizeAndSave} disabled={saving}>
             {isCreditSale ? 'Save Credit Sale' : 'Finalize & Save'}
           </button>
         </div>
@@ -585,34 +659,33 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
       <div style={{ display:'flex', flex:1, gap:0 }}>
         <div style={{ flex:1, padding:24, overflowY:'auto', borderRight:'1px solid #f1f5f9' }}>
           <div style={{ marginBottom:24 }}>
-            <div style={{ fontWeight:600, marginBottom:12, fontSize:14 }}>Invoice Details</div>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
-              <div><label className="form-label">Invoice Date *</label><input type="date" className="form-input" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} /></div>
-              <div><label className="form-label">Due Date</label><input type="date" className="form-input" value={dueDate} onChange={e => setDueDate(e.target.value)} /></div>
-              <div><label className="form-label">Branch</label>
-                <select className="form-select" value={branchId} onChange={e => setBranchId(e.target.value)}>
-                  <option value="">Select Branch</option>
-                  {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                </select>
-              </div>
-              <div><label className="form-label">Seller</label>
-                <select className="form-select" value={sellerId} onChange={e => setSellerId(e.target.value)}>
-                  <option value="">Select Seller</option>
-                  {sellers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ marginBottom:24 }}>
             <div style={{ fontWeight:600, marginBottom:12, fontSize:14 }}>Customer Details</div>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:12 }}>
               <div><label className="form-label">Customer Name</label>
                 <input className="form-input" placeholder="Walk-in Customer" value={customerName} onChange={e => setCustomerName(e.target.value)} list="customer-list" />
                 <datalist id="customer-list">{customers.map(c => <option key={c.id} value={c.name} />)}</datalist>
               </div>
               <div><label className="form-label">Phone Number</label><input className="form-input" placeholder="Phone" value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} /></div>
-              <div style={{ gridColumn:'span 2' }}><label className="form-label">Address</label><input className="form-input" placeholder="Customer address (optional)" value={customerAddress} onChange={e => setCustomerAddress(e.target.value)} /></div>
+              <div><label className="form-label">Address</label><input className="form-input" placeholder="Customer address (optional)" value={customerAddress} onChange={e => setCustomerAddress(e.target.value)} /></div>
+            </div>
+          </div>
+
+          <div style={{ marginBottom:24 }}>
+            <div style={{ fontWeight:600, marginBottom:12, fontSize:14 }}>Invoice Details</div>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:12 }}>
+              <div><label className="form-label">Invoice Date *</label><input type="date" className="form-input" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} /></div>
+              <div><label className="form-label">Branch</label>
+                <select className="form-select" value={branchId} onChange={e => setBranchId(e.target.value)} disabled={!!currentUser?.branch_id}>
+                  <option value="">Select Branch</option>
+                  {branches.map(b => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+                </select>
+              </div>
+              <div><label className="form-label">Seller</label>
+                <select className="form-select" value={sellerId} onChange={e => setSellerId(e.target.value)} disabled={!!currentUser?.id}>
+                  <option value="">Select Seller</option>
+                  {sellers.map(s => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
+                </select>
+              </div>
             </div>
           </div>
 
@@ -646,14 +719,16 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
 
           <div style={{ marginBottom:24 }}>
             <table className="data-table" style={{ fontSize:13 }}>
-              <thead><tr><th>#</th><th>Product</th><th>SKU</th><th style={{width:80}}>Qty</th><th style={{width:100}}>Rate (Rs.)</th><th style={{width:100}}>Amount (Rs.)</th><th></th></tr></thead>
+              <thead><tr><th>#</th><th>Product</th><th>SKU</th><th style={{width:80}}>Qty</th><th style={{width:100}}>Rate (Rs.)</th><th style={{width:100}}>Discount %</th><th style={{width:130}}>Discount (Rs.)</th><th style={{width:120}}>Amount (Rs.)</th><th></th></tr></thead>
               <tbody>
-                {items.length === 0 && <tr><td colSpan={7} style={{ textAlign:'center', color:'#94a3b8', padding:24 }}>No items added yet</td></tr>}
+                {items.length === 0 && <tr><td colSpan={9} style={{ textAlign:'center', color:'#94a3b8', padding:24 }}>No items added yet</td></tr>}
                 {items.map((item, i) => (
                   <tr key={i}>
                     <td>{i+1}</td><td>{item.name}</td><td style={{ color:'#64748b' }}>{item.sku}</td>
                     <td><input type="number" min={1} className="form-input" style={{ width:70, padding:'4px 8px' }} value={item.qty} onChange={e => updateItem(i,'qty',e.target.value)} /></td>
                     <td><input type="number" min={0} className="form-input" style={{ width:90, padding:'4px 8px' }} value={item.rate} onChange={e => updateItem(i,'rate',e.target.value)} /></td>
+                    <td><input type="number" min={0} max={100} className="form-input" style={{ width:90, padding:'4px 8px' }} value={item.discount_pct || 0} onChange={e => updateItem(i,'discount_pct',e.target.value)} /></td>
+                    <td style={{ color:'#ef4444', fontWeight:600 }}>-Rs.{getLineDiscountAmount(item).toLocaleString(undefined,{minimumFractionDigits:2})}</td>
                     <td style={{ fontWeight:600 }}>Rs.{item.amount.toLocaleString()}</td>
                     <td><button onClick={() => removeItem(i)} style={{ background:'none', border:'none', cursor:'pointer', color:'#ef4444', fontSize:16, fontWeight:700 }}>x</button></td>
                   </tr>
@@ -671,7 +746,7 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
           <div>
             <div style={{ fontWeight:600, marginBottom:10, fontSize:14 }}>Payment Mode</div>
             <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-              {['Cash','Card','UPI','EFT','Split'].map(m => (
+              {['Cash','Card'].map(m => (
                 <button key={m} type="button" onClick={() => setPaymentMode(m)}
                   style={{ padding:'6px 14px', borderRadius:20, border:'1px solid', fontSize:12, cursor:'pointer', fontWeight:500,
                     background: paymentMode===m?'#1e293b':'#fff', color: paymentMode===m?'#fff':'#64748b', borderColor: paymentMode===m?'#1e293b':'#e2e8f0' }}>
@@ -679,12 +754,6 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
                 </button>
               ))}
             </div>
-            {paymentMode === 'Split' && (
-              <div style={{ marginTop:12, display:'flex', gap:8 }}>
-                <div style={{ flex:1 }}><label className="form-label" style={{ fontSize:11 }}>Cash Amount</label><input type="number" className="form-input" placeholder="0" value={splitCash} onChange={e => setSplitCash(e.target.value)} /></div>
-                <div style={{ flex:1 }}><label className="form-label" style={{ fontSize:11 }}>Card Amount</label><input type="number" className="form-input" placeholder="0" value={splitCard} onChange={e => setSplitCard(e.target.value)} /></div>
-              </div>
-            )}
           </div>
 
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'12px 16px', background:'#f8fafc', borderRadius:8, border:'1px solid #e2e8f0' }}>

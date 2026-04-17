@@ -747,9 +747,74 @@ module.exports = function registerHandlers({ getDb }) {
   });
   ipcMain.handle('products:chooseImportFile', async () => {
     const { dialog } = require('electron');
-    const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'CSV/Excel', extensions: ['csv','xlsx','xls'] }] });
+    const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Import Files', extensions: ['csv','xlsx','xls','json'] }] });
     if (result.canceled || !result.filePaths.length) return null;
     return result.filePaths[0];
+  });
+  ipcMain.handle('products:parseImportFile', async (_, { filePath }) => {
+    const fs = require('fs');
+    const path = require('path');
+    const XLSX = require('xlsx');
+
+    function normalizeRow(row) {
+      const map = {};
+      for (const [k, v] of Object.entries(row || {})) {
+        if (!k) continue;
+        const nk = String(k).trim().toLowerCase().replace(/\s+/g, '_');
+        map[nk] = typeof v === 'string' ? v.trim() : v;
+      }
+      return map;
+    }
+
+    function parseCsv(content) {
+      const lines = content
+        .replace(/^\uFEFF/, '')
+        .split(/\r?\n/)
+        .filter(line => line.trim().length > 0);
+      if (lines.length < 2) return [];
+
+      const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase().replace(/\s+/g, '_'));
+      const rows = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+        const row = {};
+        headers.forEach((h, idx) => { row[h] = values[idx] ?? ''; });
+        rows.push(normalizeRow(row));
+      }
+      return rows;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.csv') {
+      const content = fs.readFileSync(filePath, 'utf8');
+      return parseCsv(content);
+    }
+    if (ext === '.json') {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(content);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map(normalizeRow).filter(r => Object.keys(r).length > 0);
+    }
+    if (ext === '.xlsx' || ext === '.xls') {
+      const wb = XLSX.readFile(filePath);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      return rows.map(normalizeRow).filter(r => Object.keys(r).length > 0);
+    }
+    return [];
+  });
+  ipcMain.handle('products:chooseTemplatePath', async (_, { format }) => {
+    const { dialog } = require('electron');
+    const optionsByFormat = {
+      csv: { defaultPath: 'products_import_template.csv', filters: [{ name: 'CSV', extensions: ['csv'] }] },
+      xlsx: { defaultPath: 'products_import_template.xlsx', filters: [{ name: 'Excel', extensions: ['xlsx'] }] },
+      json: { defaultPath: 'products_import_template.json', filters: [{ name: 'JSON', extensions: ['json'] }] },
+    };
+    const opts = optionsByFormat[format] || optionsByFormat.csv;
+    const result = await dialog.showSaveDialog(opts);
+    if (result.canceled) return null;
+    return result.filePath;
   });
   ipcMain.handle('products:chooseSaveFile', async () => {
     const { dialog } = require('electron');
@@ -765,7 +830,7 @@ module.exports = function registerHandlers({ getDb }) {
   });
 
   ipcMain.handle('users:getAll', async () => {
-    const users = getDb().prepare(`SELECT id,name,mobile,email,role,is_active,avatar_path,created_at FROM users ORDER BY created_at`).all();
+    const users = getDb().prepare(`SELECT id,name,mobile,email,role,is_active,avatar_path,branch_id,created_at FROM users ORDER BY created_at`).all();
     return users;
   });
   ipcMain.handle('users:create', async (_, data) => {
@@ -781,6 +846,15 @@ module.exports = function registerHandlers({ getDb }) {
     } else {
       db.prepare(`UPDATE users SET name=?,mobile=?,email=?,role=?,branch_id=? WHERE id=?`).run(data.name, data.mobile, data.email, data.role, data.branch_id||null, id);
     }
+    return { success: true };
+  });
+  ipcMain.handle('users:updatePassword', async (_, { id, password }) => {
+    if (!password || password.length < 8) {
+      return { success: false, error: 'Password must be at least 8 characters.' };
+    }
+    const db = getDb();
+    const hash = bcrypt.hashSync(password, 10);
+    db.prepare(`UPDATE users SET password=? WHERE id=?`).run(hash, id);
     return { success: true };
   });
   ipcMain.handle('users:toggleActive', async (_, { id, is_active }) => {
