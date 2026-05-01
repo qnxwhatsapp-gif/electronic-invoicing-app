@@ -194,6 +194,9 @@ export default function InventoryServices() {
   const [showModal, setShowModal] = useState(false);
   const [editProduct, setEditProduct] = useState(null);
   const [showImportHelper, setShowImportHelper] = useState(false);
+  const [showAddOptions, setShowAddOptions] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [deleteCategoryName, setDeleteCategoryName] = useState('');
   const { can } = useAuth();
 
   useEffect(() => { loadAll(); }, [search, catFilter, statusFilter, selectedBranch]);
@@ -308,6 +311,40 @@ export default function InventoryServices() {
     else toast.error(result.error || 'Failed to delete');
   }
 
+  async function handleAddCategory() {
+    const name = newCategoryName.trim();
+    if (!name) {
+      toast.error('Enter category name');
+      return;
+    }
+    const result = await window.electron.invoke('categories:create', { name });
+    if (result?.success) {
+      toast.success('Category added');
+      setNewCategoryName('');
+      loadAll();
+      setCatFilter(name);
+    } else {
+      toast.error(result?.error || 'Failed to add category');
+    }
+  }
+
+  async function handleDeleteCategory() {
+    const selected = categories.find(c => c.name === deleteCategoryName);
+    if (!selected) {
+      toast.error('Select a category to delete');
+      return;
+    }
+    if (!window.confirm(`Delete category "${selected.name}"?`)) return;
+    const result = await window.electron.invoke('categories:delete', { id: selected.id });
+    if (result?.success) {
+      toast.success('Category deleted');
+      setDeleteCategoryName('');
+      loadAll();
+    } else {
+      toast.error(result?.error || 'Failed to delete category');
+    }
+  }
+
   function openAdd() { setEditProduct(null); setShowModal(true); }
   function openEdit(product) { setEditProduct(product); setShowModal(true); }
 
@@ -364,7 +401,7 @@ export default function InventoryServices() {
           <>
             <button className="btn btn-outline filters-bar-right" onClick={() => setShowImportHelper(true)} style={{ marginRight: 8 }}>⬆ Import Data</button>
             <button className="btn btn-outline filters-bar-right" onClick={handleExportExcel} style={{ marginRight: 8 }}>⬇ Export</button>
-            <button className="btn btn-black filters-bar-right" onClick={openAdd}>+ Add Item</button>
+            <button className="btn btn-black filters-bar-right" onClick={() => setShowAddOptions(true)}>+ Add Item</button>
           </>
         )}
       </div>
@@ -413,6 +450,48 @@ export default function InventoryServices() {
           onClose={() => setShowModal(false)}
           onSaved={loadAll}
         />
+      )}
+
+      {showAddOptions && (
+        <div className="modal-overlay" onClick={() => setShowAddOptions(false)}>
+          <div className="modal-card modal-sm" onClick={e => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowAddOptions(false)}>✕</button>
+            <div className="modal-title">Choose Action</div>
+            <div className="modal-subtitle">Select what you want to manage</div>
+
+            <div style={{ display:'flex', flexDirection:'column', gap:10, margin:'14px 0 10px' }}>
+              <button className="btn btn-black" onClick={() => { setShowAddOptions(false); openAdd(); }}>+ Add Item</button>
+              <div style={{ display:'flex', gap:8 }}>
+                <input
+                  className="form-input"
+                  placeholder="Category name"
+                  value={newCategoryName}
+                  onChange={e => setNewCategoryName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { handleAddCategory(); } }}
+                />
+                <button className="btn btn-outline" onClick={handleAddCategory}>Add Category</button>
+              </div>
+              <div style={{ display:'flex', gap:8 }}>
+                <select className="form-select" value={deleteCategoryName} onChange={e => setDeleteCategoryName(e.target.value)} style={{ flex:1 }}>
+                  <option value="">Select Category</option>
+                  {categories.map(c => <option key={c.id}>{c.name}</option>)}
+                </select>
+                <button
+                  className="btn btn-outline"
+                  onClick={handleDeleteCategory}
+                  disabled={!deleteCategoryName}
+                  style={{ color: !deleteCategoryName ? '#9ca3af' : '#ef4444', borderColor: !deleteCategoryName ? '#e5e7eb' : '#fecaca' }}
+                >
+                  Delete Category
+                </button>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => setShowAddOptions(false)}>Close</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {showImportHelper && (

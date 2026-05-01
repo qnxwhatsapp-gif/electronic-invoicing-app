@@ -111,7 +111,11 @@ module.exports = function registerHandlers({ getDb }) {
   // ─── INVOICES ─────────────────────────────────────────────────────────────
   ipcMain.handle('invoices:getAll', async (_, { status, search, branch_id } = {}) => {
     const db = getDb();
-    let q = `SELECT i.*, u.name as seller_name, (SELECT COUNT(*) FROM invoice_items WHERE invoice_id=i.id) as item_count FROM invoices i LEFT JOIN users u ON u.id = i.seller_id WHERE 1=1`;
+    let q = `SELECT i.*, u.name as seller_name,
+      (SELECT COUNT(*) FROM invoice_items WHERE invoice_id=i.id) as item_count,
+      (SELECT COALESCE(SUM(qty),0) FROM invoice_items WHERE invoice_id=i.id) as total_qty,
+      (SELECT COALESCE(SUM(items_returned),0) FROM return_exchange WHERE original_invoice_id=i.id) as returned_qty
+      FROM invoices i LEFT JOIN users u ON u.id = i.seller_id WHERE 1=1`;
     const params = [];
     if (status && status !== 'All') { q += ` AND i.status = ?`; params.push(status); }
     if (search) { q += ` AND (i.invoice_no LIKE ? OR i.customer_name LIKE ? OR i.customer_phone LIKE ?)`; const s = `%${search}%`; params.push(s, s, s); }
@@ -272,6 +276,23 @@ module.exports = function registerHandlers({ getDb }) {
     return db.prepare(`SELECT * FROM return_exchange ORDER BY date DESC`).all();
   });
 
+  ipcMain.handle('returns:getEligibleInvoices', async () => {
+    const db = getDb();
+    return db.prepare(`
+      SELECT
+        i.*,
+        (SELECT COUNT(*) FROM invoice_items WHERE invoice_id = i.id) as item_count,
+        (SELECT COALESCE(SUM(qty), 0) FROM invoice_items WHERE invoice_id = i.id) as total_qty,
+        (SELECT COALESCE(SUM(items_returned), 0) FROM return_exchange WHERE original_invoice_id = i.id) as returned_qty
+      FROM invoices i
+      WHERE i.status = 'Paid'
+        AND CAST(julianday('now') - julianday(i.invoice_date) AS INTEGER) <= 15
+        AND (SELECT COALESCE(SUM(items_returned), 0) FROM return_exchange WHERE original_invoice_id = i.id)
+            < (SELECT COALESCE(SUM(qty), 0) FROM invoice_items WHERE invoice_id = i.id)
+      ORDER BY i.invoice_date DESC, i.id DESC
+    `).all();
+  });
+
   ipcMain.handle('returns:create', async (_, data) => {
     const db = getDb();
     // Validate 15-day return window
@@ -283,8 +304,22 @@ module.exports = function registerHandlers({ getDb }) {
         if (origInv.status === 'Completed') return { success: false, error: 'This invoice is completed and cannot be returned.' };
       }
     }
+    const soldQty = db.prepare(`SELECT COALESCE(SUM(qty),0) as v FROM invoice_items WHERE invoice_id = ?`).get(data.original_invoice_id)?.v || Number(data.total_items_sold || 0);
+    const prevReturnedQty = db.prepare(`SELECT COALESCE(SUM(items_returned),0) as v FROM return_exchange WHERE original_invoice_id = ?`).get(data.original_invoice_id)?.v || 0;
+    const currentReturnedQty = Number(data.items_returned || 0);
+    if (currentReturnedQty <= 0) return { success: false, error: 'No return quantity selected' };
+    if ((prevReturnedQty + currentReturnedQty) > soldQty) {
+      return { success: false, error: 'Return quantity exceeds sold quantity for this invoice' };
+    }
+    const computedStatus = (prevReturnedQty + currentReturnedQty) >= soldQty ? 'Completed' : 'Partial';
+
     const ins = db.prepare(`INSERT INTO return_exchange (original_invoice_id, invoice_no, customer_name, type, total_items_sold, items_returned, return_amount, exchange_amount, net_amount, status, created_by) VALUES (@original_invoice_id,@invoice_no,@customer_name,@type,@total_items_sold,@items_returned,@return_amount,@exchange_amount,@net_amount,@status,@created_by)`);
-    const r = ins.run(data);
+    const payload = {
+      ...data,
+      total_items_sold: soldQty,
+      status: computedStatus,
+    };
+    const r = ins.run(payload);
     // restore stock for returned items
     if (data.items) {
       const upd = db.prepare(`UPDATE products SET current_stock = current_stock + ? WHERE id = ?`);
@@ -355,6 +390,33 @@ module.exports = function registerHandlers({ getDb }) {
   ipcMain.handle('categories:getAll', async () => {
     const db = getDb();
     return db.prepare(`SELECT * FROM categories ORDER BY name`).all();
+  });
+
+  ipcMain.handle('categories:create', async (_, { name }) => {
+    const db = getDb();
+    const normalized = String(name || '').trim();
+    if (!normalized) return { success: false, error: 'Category name is required' };
+    try {
+      const result = db.prepare(`INSERT INTO categories (name) VALUES (?)`).run(normalized);
+      return { success: true, id: result.lastInsertRowid };
+    } catch (error) {
+      if (String(error.message || '').includes('UNIQUE')) {
+        return { success: false, error: 'Category already exists' };
+      }
+      return { success: false, error: error.message || 'Failed to create category' };
+    }
+  });
+
+  ipcMain.handle('categories:delete', async (_, { id }) => {
+    const db = getDb();
+    const categoryId = Number(id);
+    if (!categoryId) return { success: false, error: 'Invalid category id' };
+    const inUse = db.prepare(`SELECT COUNT(*) as c FROM products WHERE category_id = ?`).get(categoryId)?.c || 0;
+    if (inUse > 0) {
+      return { success: false, error: 'Cannot delete category in use by products' };
+    }
+    db.prepare(`DELETE FROM categories WHERE id = ?`).run(categoryId);
+    return { success: true };
   });
 
   // ─── VENDORS ──────────────────────────────────────────────────────────────
@@ -1008,6 +1070,39 @@ module.exports = function registerHandlers({ getDb }) {
     const alreadyDone = db.prepare(`SELECT id FROM backups WHERE type = 'Auto Backup' AND substr(date_time,1,10) = ? LIMIT 1`).get(today);
     if (alreadyDone) return { success: true, skipped: true, reason: 'already-backed-up-today' };
     return createDatabaseBackup('Auto Backup');
+  });
+
+  ipcMain.handle('backup:getFolderPath', async () => {
+    const fs = require('fs');
+    const { backupsDir } = getBackupPaths();
+    try {
+      fs.mkdirSync(backupsDir, { recursive: true });
+      return { success: true, path: backupsDir };
+    } catch (error) {
+      return { success: false, error: error.message || 'Failed to resolve backup folder' };
+    }
+  });
+
+  ipcMain.handle('backup:openFolder', async () => {
+    const fs = require('fs');
+    const { shell } = require('electron');
+    const { pathToFileURL } = require('url');
+    const { backupsDir } = getBackupPaths();
+    try {
+      fs.mkdirSync(backupsDir, { recursive: true });
+
+      // Electron shell.openPath returns '' on success, or an error string on failure.
+      const openResult = await shell.openPath(backupsDir);
+      if (!openResult) {
+        return { success: true, path: backupsDir };
+      }
+
+      // Fallback for environments where openPath fails.
+      await shell.openExternal(pathToFileURL(backupsDir).href);
+      return { success: true, path: backupsDir };
+    } catch (error) {
+      return { success: false, error: error.message || 'Failed to open backup folder' };
+    }
   });
 
   // ─── NOTIFICATIONS ────────────────────────────────────────────────────────

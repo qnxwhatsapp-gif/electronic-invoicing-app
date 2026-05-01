@@ -852,6 +852,7 @@ function ClearDataModal({ onClose, onCleared }) {
 function BackupSecurity() {
   const [logs, setLogs] = useState([]);
   const [showClear, setShowClear] = useState(false);
+  const [backupFolder, setBackupFolder] = useState('');
 
   async function load() {
     const data = await window.electron.invoke('backup:getLogs').catch(() => []);
@@ -861,6 +862,8 @@ function BackupSecurity() {
   useEffect(() => {
     (async () => {
       await window.electron.invoke('backup:runDailyCheck').catch(() => null);
+      const p = await window.electron.invoke('backup:getFolderPath').catch(() => null);
+      if (p?.success) setBackupFolder(p.path || '');
       await load();
     })();
   }, []);
@@ -885,6 +888,13 @@ function BackupSecurity() {
       load();
     } else {
       toast.error('Restore failed');
+    }
+  }
+
+  async function openBackupFolder() {
+    const r = await window.electron.invoke('backup:openFolder').catch(() => ({ success: false }));
+    if (!r?.success) {
+      toast.error(r?.error || 'Failed to open backup folder');
     }
   }
 
@@ -921,6 +931,7 @@ function BackupSecurity() {
       <div style={{ display:'flex', gap:12, marginBottom:24 }}>
         <button className="btn btn-black" onClick={backupNow}>☁ Backup Now</button>
         <button className="btn btn-outline" onClick={restoreBackup}>↺ Restore Data</button>
+        <button className="btn btn-outline" onClick={openBackupFolder}>📂 Open Backup Folder</button>
         <button
           onClick={() => setShowClear(true)}
           style={{ padding:'8px 16px', borderRadius:8, fontWeight:600, fontSize:13, cursor:'pointer', background:'#fef2f2', color:'#ef4444', border:'1.5px solid #fecaca' }}
@@ -928,6 +939,12 @@ function BackupSecurity() {
           🗑️ Clear Data
         </button>
       </div>
+
+      {backupFolder && (
+        <div style={{ fontSize:12, color:'#64748b', marginBottom:16 }}>
+          Backup folder: <code>{backupFolder}</code>
+        </div>
+      )}
 
       <div style={{ fontWeight:700, marginBottom:12 }}>Recent Activity</div>
       <table className="data-table">

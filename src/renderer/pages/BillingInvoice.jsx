@@ -9,15 +9,40 @@ async function printInvoice(invoice) {
   if (!invoice) return;
   const invoiceSettings = await window.electron.invoke('invoiceSettings:get', {}).catch(() => null);
   const companyProfile = await window.electron.invoke('settings:getCompany', {}).catch(() => null);
+  const toBool = (v, fallback = false) => {
+    if (v === undefined || v === null) return fallback;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'number') return v !== 0;
+    const s = String(v).trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(s)) return true;
+    if (['0', 'false', 'no', 'off'].includes(s)) return false;
+    return fallback;
+  };
+
   const footerNote = invoiceSettings?.footer_notes || '';
   const termsAndConditions = invoiceSettings?.terms_conditions || '';
-  const companyName = companyProfile?.company_name || invoiceSettings?.seller_name || 'Invoicing App';
+  const companyName = invoiceSettings?.seller_name || companyProfile?.company_name || 'Invoicing App';
+  const sellerTagline = invoiceSettings?.seller_tagline || '';
+  const templateColor = invoiceSettings?.template_color || '#111111';
+  const showCustomerPhone = toBool(invoiceSettings?.show_customer_phone, true);
+  const showDueDate = toBool(invoiceSettings?.show_due_date, true);
+  const showBankDetails = toBool(invoiceSettings?.show_bank_details, true);
+  const customFields = Array.isArray(invoiceSettings?.custom_fields) ? invoiceSettings.custom_fields : [];
   const companyContact = [
-    companyProfile?.address || '',
-    [companyProfile?.mobile, companyProfile?.email].filter(Boolean).join(' | ')
+    invoiceSettings?.seller_address || companyProfile?.address || '',
+    [invoiceSettings?.seller_phone || companyProfile?.mobile, invoiceSettings?.seller_email || companyProfile?.email].filter(Boolean).join(' | '),
+    invoiceSettings?.seller_website || '',
+    [invoiceSettings?.seller_gstin ? `GSTIN: ${invoiceSettings.seller_gstin}` : '', invoiceSettings?.seller_pan ? `PAN: ${invoiceSettings.seller_pan}` : ''].filter(Boolean).join(' | ')
   ].filter(Boolean).join('<br>');
   const logoPath = companyProfile?.logo_path || invoiceSettings?.seller_logo_path || '';
-  const logoUrl = logoPath ? `file:///${String(logoPath).replace(/\\/g, '/')}` : '';
+  let logoUrl = '';
+  if (logoPath) {
+    const logoRes = await window.electron.invoke('settings:getLogoDataUrl', { filePath: logoPath }).catch(() => null);
+    logoUrl = logoRes?.success ? (logoRes.dataUrl || '') : '';
+  }
+  const printedAt = new Date();
+  const printedDate = printedAt.toISOString().slice(0, 10);
+  const printedTime = printedAt.toLocaleTimeString();
   const items = invoice.items || [];
   const rows = items.map((it, i) => `
     <tr>
@@ -33,38 +58,47 @@ async function printInvoice(invoice) {
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family: Arial, sans-serif; font-size: 13px; color: #111; padding: 32px; }
-    .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; padding-bottom:16px; border-bottom:2px solid #111; }
+    .preview-toolbar { display:flex; justify-content:flex-end; gap:8px; margin-bottom:14px; }
+    .preview-btn { padding:8px 14px; border:1px solid #d1d5db; border-radius:8px; background:#fff; cursor:pointer; font-size:12px; font-weight:600; }
+    .preview-btn.primary { background:${templateColor}; color:#fff; border-color:${templateColor}; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; padding-bottom:16px; border-bottom:2px solid ${templateColor}; }
     .company-header { display:flex; align-items:center; gap:10px; }
     .company-logo { width:52px; height:52px; object-fit:contain; border:1px solid #e5e7eb; border-radius:8px; padding:4px; background:#fff; }
     .company-name { font-size:22px; font-weight:700; }
     .company-info { font-size:12px; color:#555; margin-top:4px; line-height:1.6; }
-    .invoice-title { font-size:28px; font-weight:700; color:#111; text-align:right; }
+    .invoice-title { font-size:28px; font-weight:700; color:${templateColor}; text-align:right; }
     .invoice-meta { font-size:12px; text-align:right; color:#555; margin-top:4px; line-height:1.8; }
     .bill-to { margin:20px 0; display:flex; justify-content:space-between; }
     .bill-box { background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:14px 18px; flex:1; margin-right:12px; }
     .bill-box:last-child { margin-right:0; }
     .bill-box label { font-size:10px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:6px; }
     table { width:100%; border-collapse:collapse; margin:20px 0; }
-    th { background:#111; color:#fff; padding:10px 12px; text-align:left; font-size:12px; }
+    th { background:${templateColor}; color:#fff; padding:10px 12px; text-align:left; font-size:12px; }
     td { padding:9px 12px; border-bottom:1px solid #f1f5f9; font-size:13px; }
     tr:nth-child(even) td { background:#f8fafc; }
     .totals { margin-left:auto; width:260px; }
     .totals-row { display:flex; justify-content:space-between; padding:5px 0; font-size:13px; }
-    .totals-row.grand { font-weight:700; font-size:16px; border-top:2px solid #111; padding-top:8px; margin-top:4px; }
+    .totals-row.grand { font-weight:700; font-size:16px; border-top:2px solid ${templateColor}; padding-top:8px; margin-top:4px; }
+    .custom-fields { margin-top:12px; border:1px dashed #e2e8f0; border-radius:8px; padding:10px 12px; font-size:12px; color:#475569; }
     .status-badge { display:inline-block; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:700; }
     .status-Paid { background:#d1fae5; color:#065f46; }
     .status-Credit { background:#dbeafe; color:#1e40af; }
     .status-Draft { background:#f1f5f9; color:#475569; }
     .footer { margin-top:32px; padding-top:16px; border-top:1px solid #e2e8f0; font-size:12px; color:#64748b; }
     .payment-badge { font-size:12px; background:#f1f5f9; padding:4px 10px; border-radius:6px; display:inline-block; margin-top:4px; }
-    @media print { body { padding:16px; } button { display:none; } }
+    @media print { body { padding:16px; } .preview-toolbar { display:none; } }
   </style></head><body>
+  <div class="preview-toolbar">
+    <button class="preview-btn" onclick="window.close()">Close</button>
+    <button class="preview-btn primary" onclick="window.print()">Print (Ctrl/Cmd+P)</button>
+  </div>
   <div class="header">
     <div>
       <div class="company-header">
         ${logoUrl ? `<img class="company-logo" src="${logoUrl}" alt="Company Logo" />` : ''}
         <div>
           <div class="company-name">${companyName}</div>
+          ${sellerTagline ? `<div style="font-size:12px;color:#64748b;margin-top:2px">${sellerTagline}</div>` : ''}
           <div class="company-info">${companyContact || '-'}</div>
         </div>
       </div>
@@ -74,7 +108,8 @@ async function printInvoice(invoice) {
       <div class="invoice-meta">
         <b>${invoice.invoice_no}</b><br>
         Date: ${invoice.invoice_date}<br>
-        ${invoice.due_date ? `Due: ${invoice.due_date}<br>` : ''}
+        Printed: ${printedDate} ${printedTime}<br>
+        ${(showDueDate && invoice.due_date) ? `Due: ${invoice.due_date}<br>` : ''}
         Status: <span class="status-badge status-${invoice.status}">${invoice.status}</span>
       </div>
     </div>
@@ -84,7 +119,7 @@ async function printInvoice(invoice) {
     <div class="bill-box">
       <label>Bill To</label>
       <div style="font-weight:600;font-size:14px">${invoice.customer_name || 'Walk-in Customer'}</div>
-      ${invoice.customer_phone ? `<div style="color:#555;margin-top:3px">Ph: ${invoice.customer_phone}</div>` : ''}
+      ${(showCustomerPhone && invoice.customer_phone) ? `<div style="color:#555;margin-top:3px">Ph: ${invoice.customer_phone}</div>` : ''}
       ${invoice.customer_address ? `<div style="color:#555;margin-top:3px">${invoice.customer_address}</div>` : ''}
     </div>
     <div class="bill-box">
@@ -105,18 +140,60 @@ async function printInvoice(invoice) {
     <div class="totals-row grand"><span>Grand Total</span><span>Rs.${Number(invoice.grand_total).toLocaleString('en-IN',{minimumFractionDigits:2})}</span></div>
   </div>
 
+  ${(showBankDetails && (invoiceSettings?.bank_name || invoiceSettings?.bank_account_no || invoiceSettings?.bank_ifsc || invoiceSettings?.bank_branch)) ? `
+  <div class="custom-fields">
+    <div style="font-weight:700; margin-bottom:6px;">Bank Details</div>
+    ${invoiceSettings?.bank_name ? `<div><strong>Bank:</strong> ${invoiceSettings.bank_name}</div>` : ''}
+    ${invoiceSettings?.bank_account_no ? `<div><strong>A/C No:</strong> ${invoiceSettings.bank_account_no}</div>` : ''}
+    ${invoiceSettings?.bank_ifsc ? `<div><strong>IFSC:</strong> ${invoiceSettings.bank_ifsc}</div>` : ''}
+    ${invoiceSettings?.bank_branch ? `<div><strong>Branch:</strong> ${invoiceSettings.bank_branch}</div>` : ''}
+  </div>` : ''}
+
+  ${customFields.length ? `
+  <div class="custom-fields">
+    <div style="font-weight:700; margin-bottom:6px;">Custom Fields</div>
+    ${customFields.map(f => `<div><strong>${f.label || 'Field'}:</strong> ${f.value || ''}</div>`).join('')}
+  </div>` : ''}
+
   ${(invoice.internal_notes || footerNote || termsAndConditions) ? `
   <div class="footer">
     ${invoice.internal_notes ? `<div><strong>Notes:</strong> ${invoice.internal_notes}</div>` : ''}
     ${footerNote ? `<div style="margin-top:${invoice.internal_notes ? '8px' : '0'}"><strong>Footer Note:</strong> ${footerNote}</div>` : ''}
     ${termsAndConditions ? `<div style="margin-top:${(invoice.internal_notes || footerNote) ? '8px' : '0'}"><strong>Terms & Conditions:</strong> ${termsAndConditions}</div>` : ''}
   </div>` : ''}
+  <script>
+    function returnToApp() {
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.focus();
+        }
+      } catch (e) {}
+      try { window.close(); } catch (e) {}
+    }
+
+    window.addEventListener('afterprint', function() {
+      // After print dialog closes (print or cancel), return to app screen.
+      returnToApp();
+    });
+
+    document.addEventListener('keydown', function(e) {
+      const k = (e.key || '').toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && k === 'p') {
+        e.preventDefault();
+        window.print();
+      }
+      if (k === 'escape') {
+        e.preventDefault();
+        returnToApp();
+      }
+    });
+  </script>
   </body></html>`;
 
   const win = window.open('', '_blank', 'width=800,height=700');
   win.document.write(html);
   win.document.close();
-  win.onload = () => { win.print(); win.close(); };
+  // Preview-first flow: user can inspect, then print via button or Ctrl/Cmd+P.
 }
 
 // -- KebabMenu --------------------------------------------------------------
@@ -980,14 +1057,8 @@ function ReturnExchangeTab({ onCreateReturn, onPickInvoice, refreshNonce = 0 }) 
 
   async function loadEligibleInvoices() {
     try {
-      const data = await window.electron.invoke('invoices:getAll', { status: 'Paid' });
-      const list = Array.isArray(data) ? data : [];
-      const eligible = list.filter((inv) => {
-        if (!inv?.invoice_date) return false;
-        const daysSince = Math.floor((Date.now() - new Date(inv.invoice_date).getTime()) / 86400000);
-        return daysSince <= 15;
-      });
-      setEligibleInvoices(eligible);
+      const data = await window.electron.invoke('returns:getEligibleInvoices', {});
+      setEligibleInvoices(Array.isArray(data) ? data : []);
     } catch {
       setEligibleInvoices([]);
     }
@@ -1045,7 +1116,7 @@ function ReturnExchangeTab({ onCreateReturn, onPickInvoice, refreshNonce = 0 }) 
                 <td style={{ textAlign:'center' }}>{r.items_returned || 0}</td>
                 <td style={{ fontWeight:600, color:'#ef4444' }}>Rs.{Number(r.return_amount||0).toLocaleString()}</td>
                 <td>{(r.date||r.created_at||'').split('T')[0]}</td>
-                <td><span className={`badge ${r.status === 'Completed' ? 'badge-green' : 'badge-grey'}`}>{r.status}</span></td>
+                <td><span className={`badge ${r.status === 'Completed' ? 'badge-green' : r.status === 'Partial' ? 'badge-orange' : 'badge-grey'}`}>{r.status}</span></td>
               </tr>
             ))}
           </tbody>
@@ -1260,9 +1331,15 @@ export default function BillingInvoice() {
               <tbody>
                 {displayList.length === 0 && <tr><td colSpan={10} style={{ textAlign:'center', color:'#94a3b8', padding:32 }}>No invoices found</td></tr>}
                 {displayList.map((inv, i) => (
-                  <tr key={inv.id}>
+                  <tr
+                    key={inv.id}
+                    onClick={() => setViewInvoice(inv.id)}
+                    style={{ cursor: 'pointer' }}
+                    onMouseEnter={e => { e.currentTarget.style.background = '#f8fafc'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = ''; }}
+                  >
                     <td>{i+1}</td>
-                    <td style={{ fontWeight:600, cursor:'pointer', color:'#2563eb' }} onClick={() => setViewInvoice(inv.id)}>{inv.invoice_no}</td>
+                    <td style={{ fontWeight:600, color:'#2563eb' }}>{inv.invoice_no}</td>
                     <td>{inv.customer_name || 'Walk-in'}</td>
                     <td>{inv.customer_phone || '-'}</td>
                     <td style={{ textAlign:'center' }}>{inv.item_count || '-'}</td>
@@ -1274,7 +1351,7 @@ export default function BillingInvoice() {
                         {inv.status}
                       </span>
                     </td>
-                    <td>
+                    <td onClick={e => e.stopPropagation()}>
                       <KebabMenu items={[
                         { label:'View Details', icon:'[+]', action:() => setViewInvoice(inv.id) },
                         ...(inv.status !== 'Draft' ? [{
