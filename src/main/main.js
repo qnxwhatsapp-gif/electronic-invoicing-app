@@ -1,6 +1,18 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const path = require('path');
-const isDev = process.env.NODE_ENV !== 'production';
+const { pathToFileURL } = require('url');
+
+/**
+ * Packaged builds often do not set NODE_ENV=production. Using only NODE_ENV
+ * makes isDev true and loads localhost:3000 → blank window in MSI/win-unpacked.
+ */
+function getStartURL() {
+  if (app.isPackaged) {
+    const indexPath = path.join(__dirname, '../../build/index.html');
+    return pathToFileURL(indexPath).href;
+  }
+  return 'http://localhost:3000';
+}
 
 let mainWindow;
 
@@ -20,14 +32,19 @@ function createWindow() {
     titleBarStyle: 'default',
   });
 
-  const startURL = isDev
-    ? 'http://localhost:3000'
-    : `file://${path.join(__dirname, '../../build/index.html')}`;
+  const startURL = getStartURL();
+
+  mainWindow.webContents.on('did-fail-load', (_event, code, desc, url) => {
+    console.error('[did-fail-load]', { code, desc, url });
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[render-process-gone]', details);
+  });
 
   mainWindow.loadURL(startURL);
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
-  if (isDev && process.env.OPEN_DEVTOOLS === '1') {
+  if (!app.isPackaged && process.env.OPEN_DEVTOOLS === '1') {
     mainWindow.webContents.openDevTools();
   }
 }

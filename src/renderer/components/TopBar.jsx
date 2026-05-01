@@ -243,6 +243,28 @@ export default function TopBar() {
   const { query, results, loading, open, setOpen, search, clear } = useSearch();
   const navigate = useNavigate();
   const searchRef = useRef(null);
+  const [company, setCompany] = useState({ company_name: 'Invoicing App', logo_path: '' });
+  const [logoSrc, setLogoSrc] = useState('');
+
+  useEffect(() => {
+    window.electron.invoke('settings:getCompany', {})
+      .then((d) => { if (d) setCompany(d); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    async function loadLogo() {
+      if (!company.logo_path) {
+        if (alive) setLogoSrc('');
+        return;
+      }
+      const res = await window.electron.invoke('settings:getLogoDataUrl', { filePath: company.logo_path }).catch(() => null);
+      if (alive) setLogoSrc(res?.success ? (res.dataUrl || '') : '');
+    }
+    loadLogo();
+    return () => { alive = false; };
+  }, [company.logo_path]);
 
   // Ctrl+K / Cmd+K shortcut
   useEffect(() => {
@@ -268,7 +290,16 @@ export default function TopBar() {
 
   return (
     <div className="topbar">
-      <div />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 220 }}>
+        <div style={{ width: 30, height: 30, borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+          {logoSrc ? (
+            <img src={logoSrc} alt="Company logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+          ) : null}
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: '#111827', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 170 }}>
+          {company.company_name || 'Invoicing App'}
+        </div>
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
         {/* Search */}
         <div className="topbar-search">

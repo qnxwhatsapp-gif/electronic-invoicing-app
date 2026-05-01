@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
@@ -17,12 +17,38 @@ export default function Sidebar() {
   const { can } = useAuth();
   const navigate = useNavigate();
   const { pathname } = useLocation();
+  const [company, setCompany] = useState({ company_name: 'Invoicing App', logo_path: '' });
+  const [logoSrc, setLogoSrc] = useState('');
+
+  useEffect(() => {
+    window.electron.invoke('settings:getCompany', {})
+      .then((d) => { if (d) setCompany(d); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    async function loadLogo() {
+      if (!company.logo_path) {
+        if (alive) setLogoSrc('');
+        return;
+      }
+      const res = await window.electron.invoke('settings:getLogoDataUrl', { filePath: company.logo_path }).catch(() => null);
+      if (alive) setLogoSrc(res?.success ? (res.dataUrl || '') : '');
+    }
+    loadLogo();
+    return () => { alive = false; };
+  }, [company.logo_path]);
 
   return (
     <div className="sidebar">
       <div className="sidebar-logo">
-        <div className="sidebar-logo-box" />
-        <span className="sidebar-logo-text">LOGO</span>
+        <div className="sidebar-logo-box" style={{ overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {logoSrc ? (
+            <img src={logoSrc} alt="Company logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+          ) : null}
+        </div>
+        <span className="sidebar-logo-text">{company.company_name || 'Invoicing App'}</span>
       </div>
       <nav className="sidebar-nav">
         {NAV.filter(item => can(item.module, 'view')).map(item => (

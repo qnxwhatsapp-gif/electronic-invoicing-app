@@ -108,6 +108,14 @@ Add Excel export to the Sales Report per SKILL.md Section 21.
 
 ---
 
+## 📘 User Documentation
+
+For end-user daily operations, see:
+
+- `USER_GUIDE.md`
+
+---
+
 ## 🤖 Cursor Skill: `/init`
 
 This repository now includes a project skill at:

@@ -21,12 +21,31 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [rolesLoading, setRolesLoading] = useState(true);
+  const [company, setCompany] = useState({ company_name: 'Invoicing App', logo_path: '' });
+  const [logoSrc, setLogoSrc] = useState('');
   const { login } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
     loadRoles();
+    window.electron.invoke('settings:getCompany', {})
+      .then((d) => { if (d) setCompany(d); })
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    async function loadLogo() {
+      if (!company.logo_path) {
+        if (alive) setLogoSrc('');
+        return;
+      }
+      const res = await window.electron.invoke('settings:getLogoDataUrl', { filePath: company.logo_path }).catch(() => null);
+      if (alive) setLogoSrc(res?.success ? (res.dataUrl || '') : '');
+    }
+    loadLogo();
+    return () => { alive = false; };
+  }, [company.logo_path]);
 
   async function loadRoles() {
     setRolesLoading(true);
@@ -71,8 +90,12 @@ export default function Login() {
     <div className="login-page">
       <div className="login-card">
         <div className="login-logo">
-          <div className="login-logo-box" />
-          <div className="login-company">Invoicing App</div>
+          <div className="login-logo-box" style={{ overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#fff', border: '1px solid #e5e7eb' }}>
+            {logoSrc ? (
+              <img src={logoSrc} alt="Company logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+            ) : null}
+          </div>
+          <div className="login-company">{company.company_name || 'Invoicing App'}</div>
           <div className="login-subtitle">Sign in to your account</div>
         </div>
 

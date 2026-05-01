@@ -91,7 +91,7 @@ export default function Reports() {
   }
 
   const colMap = {
-    'Sales Report': ['date','bill_no','customer_name','item_name','qty','rate','amount','payment_status','payment_mode','profit'],
+    'Sales Report': ['date','bill_no','customer_name','items','qty','amount','payment_status','payment_mode','profit'],
     'Purchase Report': ['date','bill_no','vendor_name','item_name','qty','purchase_price','amount','payment_status'],
     'Stock Report': ['item_name','category','opening_stock','purchase_qty','sales_qty','current_stock','purchase_value','sales_value','profit_margin'],
     'Customer Outstanding': ['customer_name','invoice_no','invoice_date','total_amount','paid_amount','balance'],

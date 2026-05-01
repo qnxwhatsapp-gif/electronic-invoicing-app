@@ -74,7 +74,21 @@ export default function Settings() {
 // ── COMPANY PROFILE ──────────────────────────────────────────────────────────
 function CompanyProfile() {
   const [form, setForm] = useState({ company_name:'', mobile:'', email:'', address:'', logo_path:'' });
+  const [logoPreviewSrc, setLogoPreviewSrc] = useState('');
   useEffect(() => { window.electron.invoke('settings:getCompany').then(d => d && setForm(d)); }, []);
+  useEffect(() => {
+    let alive = true;
+    async function loadLogoPreview() {
+      if (!form.logo_path) {
+        if (alive) setLogoPreviewSrc('');
+        return;
+      }
+      const res = await window.electron.invoke('settings:getLogoDataUrl', { filePath: form.logo_path }).catch(() => null);
+      if (alive) setLogoPreviewSrc(res?.success ? (res.dataUrl || '') : '');
+    }
+    loadLogoPreview();
+    return () => { alive = false; };
+  }, [form.logo_path]);
 
   async function save() {
     await window.electron.invoke('settings:saveCompany', form);
@@ -100,8 +114,14 @@ function CompanyProfile() {
 
       {/* Logo */}
       <div style={{ display:'flex', gap:20, alignItems:'center', padding:20, border:'1px solid #e5e7eb', borderRadius:10, marginBottom:24 }}>
-        <div style={{ width:80, height:80, border:'2px dashed #d1d5db', borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, color:'#9ca3af' }}>
-          {form.logo_path ? '📎' : 'NO LOGO'}
+        <div style={{ width:80, height:80, border:'2px dashed #d1d5db', borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, color:'#9ca3af', overflow:'hidden', background:'#fff' }}>
+          {logoPreviewSrc ? (
+            <img
+              src={logoPreviewSrc}
+              alt="Company logo"
+              style={{ width:'100%', height:'100%', objectFit:'contain' }}
+            />
+          ) : 'NO LOGO'}
         </div>
         <div>
           <div style={{ fontWeight:600, marginBottom:4 }}>Company Logo</div>
@@ -833,15 +853,25 @@ function BackupSecurity() {
   const [logs, setLogs] = useState([]);
   const [showClear, setShowClear] = useState(false);
 
-  function load() {
-    window.electron.invoke('backup:getLogs').then(setLogs);
+  async function load() {
+    const data = await window.electron.invoke('backup:getLogs').catch(() => []);
+    setLogs(Array.isArray(data) ? data : []);
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    (async () => {
+      await window.electron.invoke('backup:runDailyCheck').catch(() => null);
+      await load();
+    })();
+  }, []);
 
   async function backupNow() {
-    await window.electron.invoke('backup:now');
-    toast.success('Backup completed!');
+    const r = await window.electron.invoke('backup:now');
+    if (r?.success) {
+      toast.success('Backup completed!');
+    } else {
+      toast.error(r?.error || 'Backup failed');
+    }
     load();
   }
 

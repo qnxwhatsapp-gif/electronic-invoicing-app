@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { useAuth } from '../context/AuthContext';
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -9,6 +10,15 @@ export default function Dashboard() {
   const [branches, setBranches] = useState([]);
   const [selectedBranch, setSelectedBranch] = useState('');
   const navigate = useNavigate();
+  const { currentUser, can } = useAuth();
+
+  const isOwner = currentUser?.role === 'Owner';
+  const canViewBilling = can('billing', 'view');
+  const canViewInventory = can('inventory', 'view');
+  const canViewVendors = can('vendors', 'view');
+  const canViewBanking = can('banking', 'view');
+  const canViewExpenses = can('expenses', 'view');
+  const canViewReports = can('reports', 'view');
 
   // Load branches on mount
   useEffect(() => {
@@ -16,6 +26,13 @@ export default function Dashboard() {
       setBranches(data || []);
     }).catch(err => console.error('Error loading branches:', err));
   }, []);
+
+  // Non-owner users should stay scoped to their assigned branch
+  useEffect(() => {
+    if (!isOwner && currentUser?.branch_id) {
+      setSelectedBranch(String(currentUser.branch_id));
+    }
+  }, [isOwner, currentUser]);
 
   // Load stats whenever selectedBranch changes
   useEffect(() => {
@@ -29,17 +46,37 @@ export default function Dashboard() {
     return { month: m, total: row ? row.total : 0 };
   });
 
+  const primaryCards = [];
+  if (canViewBilling || canViewReports) {
+    primaryCards.push(
+      { key: 'totalSale', cls: 'blue', label: 'Total Sale', value: `$${stats.totalSale.toLocaleString()}`, trend: '+21%', icon: '💵' },
+      { key: 'totalProfit', cls: 'pink', label: 'Total Profit', value: `$${Math.round(stats.totalProfit).toLocaleString()}`, trend: '+17%', icon: '📈' },
+      { key: 'pendingPayment', cls: 'green', label: 'Pending Payment', value: `$${Math.round(stats.pendingPayment).toLocaleString()}`, trend: '+17%', icon: '⏳' },
+    );
+  }
+
+  const secondaryCards = [];
+  if (canViewBanking) {
+    secondaryCards.push(
+      { key: 'cashBalance', cls: 'yellow', label: 'Cash Balance', value: `$${stats.cashBalance.toLocaleString()}`, trend: '+21%', icon: '🏧' },
+      { key: 'bankBalance', cls: 'blue', label: 'Bank Balance', value: `$${stats.bankBalance.toLocaleString()}`, trend: '+21%', icon: '🏦' },
+    );
+  }
+  if (canViewInventory) {
+    secondaryCards.push({ key: 'lowStock', cls: 'pink', label: 'Low Stock Items', value: `${stats.lowStock}`, trend: '+21%', icon: '⚠️' });
+  }
+
   return (
     <div>
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <div className="page-title">Dashboard</div>
-          <div className="page-subtitle">Welcome Back, {JSON.parse(localStorage.getItem('currentUser') || '{}').name}</div>
+          <div className="page-subtitle">Welcome Back, {currentUser?.name || 'User'}</div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: isOwner ? 1 : 0.8 }}>
           <span style={{ fontSize: 13, color: '#6b7280' }}>Branch:</span>
-          <select value={selectedBranch} onChange={e => setSelectedBranch(e.target.value)} style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 12px', fontSize: 13 }}>
-            <option value=''>All Branches</option>
+          <select value={selectedBranch} onChange={e => setSelectedBranch(e.target.value)} disabled={!isOwner} style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 12px', fontSize: 13 }}>
+            {isOwner && <option value=''>All Branches</option>}
             {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </div>
@@ -49,50 +86,35 @@ export default function Dashboard() {
         {/* Left column */}
         <div>
           {/* Stat cards row 1 */}
-          <div className="stat-cards">
-            <div className="stat-card blue">
-              <div className="stat-card-label">Total Sale</div>
-              <div className="stat-card-value">${stats.totalSale.toLocaleString()}</div>
-              <div className="stat-card-trend up">+21%</div>
-              <div className="stat-card-icon">💵</div>
+          {primaryCards.length > 0 && (
+            <div className="stat-cards" style={{ gridTemplateColumns: `repeat(${Math.min(primaryCards.length, 3)}, minmax(0, 1fr))` }}>
+              {primaryCards.map(card => (
+                <div key={card.key} className={`stat-card ${card.cls}`}>
+                  <div className="stat-card-label">{card.label}</div>
+                  <div className="stat-card-value">{card.value}</div>
+                  <div className="stat-card-trend up">{card.trend}</div>
+                  <div className="stat-card-icon">{card.icon}</div>
+                </div>
+              ))}
             </div>
-            <div className="stat-card pink">
-              <div className="stat-card-label">Total Profit</div>
-              <div className="stat-card-value">${Math.round(stats.totalProfit).toLocaleString()}</div>
-              <div className="stat-card-trend up">+17%</div>
-              <div className="stat-card-icon">📈</div>
-            </div>
-            <div className="stat-card green">
-              <div className="stat-card-label">Pending Payment</div>
-              <div className="stat-card-value">${Math.round(stats.pendingPayment).toLocaleString()}</div>
-              <div className="stat-card-trend up">+17%</div>
-              <div className="stat-card-icon">⏳</div>
-            </div>
-          </div>
+          )}
 
           {/* Stat cards row 2 */}
-          <div className="stat-cards" style={{ marginBottom: 20 }}>
-            <div className="stat-card yellow">
-              <div className="stat-card-label">Cash Balance</div>
-              <div className="stat-card-value">${stats.cashBalance.toLocaleString()}</div>
-              <div className="stat-card-trend up">+21%</div>
-              <div className="stat-card-icon">🏧</div>
+          {secondaryCards.length > 0 && (
+            <div className="stat-cards" style={{ marginBottom: 20, gridTemplateColumns: `repeat(${Math.min(secondaryCards.length, 3)}, minmax(0, 1fr))` }}>
+              {secondaryCards.map(card => (
+                <div key={card.key} className={`stat-card ${card.cls}`}>
+                  <div className="stat-card-label">{card.label}</div>
+                  <div className="stat-card-value">{card.value}</div>
+                  <div className="stat-card-trend up">{card.trend}</div>
+                  <div className="stat-card-icon">{card.icon}</div>
+                </div>
+              ))}
             </div>
-            <div className="stat-card blue">
-              <div className="stat-card-label">Bank Balance</div>
-              <div className="stat-card-value">${stats.bankBalance.toLocaleString()}</div>
-              <div className="stat-card-trend up">+21%</div>
-              <div className="stat-card-icon">🏦</div>
-            </div>
-            <div className="stat-card pink">
-              <div className="stat-card-label">Low Stock Items</div>
-              <div className="stat-card-value">{stats.lowStock}</div>
-              <div className="stat-card-trend up">+21%</div>
-              <div className="stat-card-icon">⚠️</div>
-            </div>
-          </div>
+          )}
 
           {/* Monthly Sales Trend */}
+          {(canViewReports || canViewBilling) && (
           <div className="card" style={{ marginBottom: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
               <div>
@@ -110,8 +132,10 @@ export default function Dashboard() {
               </BarChart>
             </ResponsiveContainer>
           </div>
+          )}
 
           {/* Recent Invoices */}
+          {canViewBilling && (
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
               <div>
@@ -138,6 +162,13 @@ export default function Dashboard() {
               </tbody>
             </table>
           </div>
+          )}
+
+          {!canViewBilling && !canViewReports && !canViewInventory && !canViewBanking && !canViewExpenses && (
+            <div className="card" style={{ color: '#6b7280' }}>
+              No dashboard widgets available for this role yet.
+            </div>
+          )}
         </div>
 
         {/* Right column */}
@@ -146,10 +177,12 @@ export default function Dashboard() {
           <div style={{ background: '#111', borderRadius: 12, padding: 20, color: '#fff' }}>
             <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 16 }}>Quick Actions</div>
             {[
-              { icon: '🧾', title: 'New Sale', sub: 'Create Invoice', path: '/billing' },
-              { icon: '🛒', title: 'New Purchase', sub: 'Add Bill', path: '/vendors' },
-              { icon: '📦', title: 'Add Item', sub: 'Manage Stock', path: '/inventory' },
-            ].map(a => (
+              can('billing', 'create') ? { icon: '🧾', title: 'New Sale', sub: 'Create Invoice', path: '/billing' } : null,
+              can('vendors', 'create') ? { icon: '🛒', title: 'New Purchase', sub: 'Add Bill', path: '/vendors' } : null,
+              can('inventory', 'create') ? { icon: '📦', title: 'Add Item', sub: 'Manage Stock', path: '/inventory' } : null,
+              can('expenses', 'create') ? { icon: '💵', title: 'Add Expense', sub: 'Track Expense', path: '/expenses' } : null,
+              can('banking', 'create') ? { icon: '🏦', title: 'New Transaction', sub: 'Record Movement', path: '/banking' } : null,
+            ].filter(Boolean).map(a => (
               <div key={a.path} onClick={() => navigate(a.path)}
                 style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#222', borderRadius: 10, padding: '12px 14px', marginBottom: 8, cursor: 'pointer' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -162,9 +195,13 @@ export default function Dashboard() {
                 <span style={{ color: '#9ca3af' }}>→</span>
               </div>
             ))}
+            {!can('billing', 'create') && !can('vendors', 'create') && !can('inventory', 'create') && !can('expenses', 'create') && !can('banking', 'create') && (
+              <div style={{ fontSize: 12, color: '#9ca3af' }}>No quick actions available.</div>
+            )}
           </div>
 
           {/* Top Selling Items */}
+          {canViewInventory && (
           <div className="card">
             <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>Top Selling Items</div>
             <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 12 }}>Best Performing Items</div>
@@ -181,8 +218,10 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
+          )}
 
           {/* Branch Revenue */}
+          {(isOwner || canViewReports) && (
           <div style={{ background: '#fff', borderRadius: 12, padding: 20, border: '1px solid #f1f5f9', marginTop: 16 }}>
             <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14 }}>Branch Revenue</div>
             {(stats.branchRevenue || []).length === 0 && (
@@ -198,6 +237,7 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
+          )}
         </div>
       </div>
     </div>

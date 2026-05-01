@@ -204,7 +204,18 @@ module.exports = function registerHandlers({ getDb }) {
 
   ipcMain.handle('invoices:updateStatus', async (_, { id, status, paid_amount }) => {
     const db = getDb();
-    db.prepare(`UPDATE invoices SET status = ?, paid_amount = COALESCE(?, paid_amount), updated_at = datetime('now') WHERE id = ?`).run(status, paid_amount, id);
+    if (status === 'Paid') {
+      db.prepare(`
+        UPDATE invoices
+        SET status = ?,
+            paid_amount = COALESCE(?, paid_amount),
+            invoice_date = date('now'),
+            updated_at = datetime('now')
+        WHERE id = ?
+      `).run(status, paid_amount, id);
+    } else {
+      db.prepare(`UPDATE invoices SET status = ?, paid_amount = COALESCE(?, paid_amount), updated_at = datetime('now') WHERE id = ?`).run(status, paid_amount, id);
+    }
     return { success: true };
   });
 
@@ -238,7 +249,7 @@ module.exports = function registerHandlers({ getDb }) {
       payment_mode: data.payment_mode || 'Cash',
       cash_amount: data.cash_amount || null,
       online_amount: data.online_amount || null,
-      internal_notes: data.internal_notes || '',
+      internal_notes: data.notes || data.internal_notes || '',
       status: data.status || 'Draft',
       type: data.type || 'Sale',
       is_credit_sale: data.is_credit_sale || 0,
@@ -551,18 +562,37 @@ module.exports = function registerHandlers({ getDb }) {
   });
 
   // ─── REPORTS ──────────────────────────────────────────────────────────────
-  ipcMain.handle('reports:sales', async (_, { from, to }) => {
+  ipcMain.handle('reports:sales', async (_, { from, to, branch_id }) => {
     const db = getDb();
-    const rows = db.prepare(`
-      SELECT i.invoice_date as date, i.invoice_no as bill_no, i.customer_name,
-             ii.product_name as item_name, ii.qty, ii.rate, ii.amount,
-             i.status as payment_status, i.payment_mode,
-             (ii.qty * (ii.rate - p.purchase_price)) as profit
-      FROM invoices i JOIN invoice_items ii ON ii.invoice_id = i.id
+    let q = `
+      SELECT
+        i.invoice_date as date,
+        i.invoice_no as bill_no,
+        i.customer_name,
+        COALESCE(SUM(ii.qty), 0) as qty,
+        COALESCE(i.grand_total, SUM(ii.amount), 0) as amount,
+        i.status as payment_status,
+        i.payment_mode,
+        COALESCE(SUM(ii.qty * (ii.rate - COALESCE(p.purchase_price, 0))), 0) as profit,
+        GROUP_CONCAT(
+          ii.product_name || ' x' || ii.qty || ' @ ' || ii.rate,
+          ' | '
+        ) as items
+      FROM invoices i
+      JOIN invoice_items ii ON ii.invoice_id = i.id
       LEFT JOIN products p ON p.id = ii.product_id
       WHERE i.status != 'Draft' AND i.invoice_date BETWEEN ? AND ?
-      ORDER BY i.invoice_date DESC
-    `).all(from, to);
+    `;
+    const params = [from, to];
+    if (branch_id) {
+      q += ` AND i.branch_id = ?`;
+      params.push(branch_id);
+    }
+    q += `
+      GROUP BY i.id, i.invoice_date, i.invoice_no, i.customer_name, i.grand_total, i.status, i.payment_mode
+      ORDER BY i.invoice_date DESC, i.id DESC
+    `;
+    const rows = db.prepare(q).all(...params);
     return rows;
   });
 
@@ -656,7 +686,13 @@ module.exports = function registerHandlers({ getDb }) {
   // ─── SETTINGS ─────────────────────────────────────────────────────────────
   ipcMain.handle('settings:getCompany', async () => getDb().prepare(`SELECT * FROM company_profile WHERE id=1`).get());
   ipcMain.handle('settings:saveCompany', async (_, data) => {
-    getDb().prepare(`UPDATE company_profile SET company_name=?,mobile=?,email=?,address=? WHERE id=1`).run(data.company_name, data.mobile, data.email, data.address);
+    getDb().prepare(`UPDATE company_profile SET company_name=?,mobile=?,email=?,address=?,logo_path=? WHERE id=1`).run(
+      data.company_name,
+      data.mobile,
+      data.email,
+      data.address,
+      data.logo_path || ''
+    );
     return { success: true };
   });
 
@@ -684,13 +720,41 @@ module.exports = function registerHandlers({ getDb }) {
   });
 
   ipcMain.handle('settings:uploadLogo', async (_, { filePath }) => {
-    const { app, dialog } = require('electron');
+    const { app } = require('electron');
     const fs = require('fs');
     const pathMod = require('path');
-    const dest = pathMod.join(app.getPath('userData'), 'company_logo' + pathMod.extname(filePath));
-    fs.copyFileSync(filePath, dest);
-    getDb().prepare(`UPDATE company_profile SET logo_path=? WHERE id=1`).run(dest);
-    return { success: true, logo_path: dest };
+    try {
+      if (!filePath) return { success: false, error: 'No file selected' };
+      const dest = pathMod.join(app.getPath('userData'), 'company_logo' + pathMod.extname(filePath));
+      fs.copyFileSync(filePath, dest);
+      getDb().prepare(`UPDATE company_profile SET logo_path=? WHERE id=1`).run(dest);
+      return { success: true, logo_path: dest };
+    } catch (error) {
+      return { success: false, error: error.message || 'Failed to upload logo' };
+    }
+  });
+
+  ipcMain.handle('settings:getLogoDataUrl', async (_, { filePath } = {}) => {
+    const fs = require('fs');
+    const pathMod = require('path');
+    try {
+      if (!filePath || !fs.existsSync(filePath)) return { success: false, dataUrl: '' };
+      const ext = pathMod.extname(filePath).toLowerCase();
+      const mime = ext === '.png'
+        ? 'image/png'
+        : (ext === '.jpg' || ext === '.jpeg')
+        ? 'image/jpeg'
+        : ext === '.gif'
+        ? 'image/gif'
+        : ext === '.webp'
+        ? 'image/webp'
+        : null;
+      if (!mime) return { success: false, dataUrl: '' };
+      const base64 = fs.readFileSync(filePath).toString('base64');
+      return { success: true, dataUrl: `data:${mime};base64,${base64}` };
+    } catch (error) {
+      return { success: false, dataUrl: '', error: error.message || 'Failed to load logo' };
+    }
   });
 
   ipcMain.handle('settings:chooseLogoFile', async () => {
@@ -887,12 +951,63 @@ module.exports = function registerHandlers({ getDb }) {
   });
 
   // ─── BACKUP ───────────────────────────────────────────────────────────────
-  ipcMain.handle('backup:getLogs', async () => getDb().prepare(`SELECT * FROM backups ORDER BY id DESC LIMIT 20`).all());
-  ipcMain.handle('backup:now', async () => {
+  function getBackupPaths() {
+    const { app } = require('electron');
+    const pathMod = require('path');
+    const userDataDir = app.getPath('userData');
+    const dbPath = pathMod.join(userDataDir, 'invoicing.db');
+    const backupsDir = pathMod.join(userDataDir, 'backups');
+    return { dbPath, backupsDir };
+  }
+
+  function makeBackupFilename(prefix = 'invoicing_backup') {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    return `${prefix}_${stamp}.db`;
+  }
+
+  function createDatabaseBackup(typeLabel) {
     const db = getDb();
-    const now = new Date().toISOString();
-    db.prepare(`INSERT INTO backups (type,date_time,size_mb,status) VALUES ('Manual Backup (Admin)',?,0.0,'Success')`).run(now);
-    return { success: true };
+    const fs = require('fs');
+    const pathMod = require('path');
+    const { dbPath, backupsDir } = getBackupPaths();
+
+    try {
+      fs.mkdirSync(backupsDir, { recursive: true });
+
+      // Ensure WAL pages are checkpointed into the main DB file before copy.
+      try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (_) {}
+
+      const filename = makeBackupFilename('invoicing_backup');
+      const backupPath = pathMod.join(backupsDir, filename);
+      fs.copyFileSync(dbPath, backupPath);
+
+      const stats = fs.statSync(backupPath);
+      const sizeMb = Number((stats.size / (1024 * 1024)).toFixed(2));
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO backups (type,date_time,size_mb,status) VALUES (?,?,?,?)`).run(typeLabel, now, sizeMb, 'Success');
+
+      return { success: true, filePath: backupPath, size_mb: sizeMb };
+    } catch (error) {
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO backups (type,date_time,size_mb,status) VALUES (?,?,?,?)`).run(typeLabel, now, 0.0, 'Failed');
+      return { success: false, error: error.message || 'Backup failed' };
+    }
+  }
+
+  ipcMain.handle('backup:getLogs', async () => getDb().prepare(`SELECT * FROM backups ORDER BY id DESC LIMIT 20`).all());
+
+  ipcMain.handle('backup:now', async () => {
+    return createDatabaseBackup('Manual Backup (Admin)');
+  });
+
+  ipcMain.handle('backup:runDailyCheck', async () => {
+    const db = getDb();
+    const today = new Date().toISOString().slice(0, 10);
+    const alreadyDone = db.prepare(`SELECT id FROM backups WHERE type = 'Auto Backup' AND substr(date_time,1,10) = ? LIMIT 1`).get(today);
+    if (alreadyDone) return { success: true, skipped: true, reason: 'already-backed-up-today' };
+    return createDatabaseBackup('Auto Backup');
   });
 
   // ─── NOTIFICATIONS ────────────────────────────────────────────────────────

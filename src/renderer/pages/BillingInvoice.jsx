@@ -8,8 +8,16 @@ import BarcodeScanner from '../components/BarcodeScanner';
 async function printInvoice(invoice) {
   if (!invoice) return;
   const invoiceSettings = await window.electron.invoke('invoiceSettings:get', {}).catch(() => null);
+  const companyProfile = await window.electron.invoke('settings:getCompany', {}).catch(() => null);
   const footerNote = invoiceSettings?.footer_notes || '';
   const termsAndConditions = invoiceSettings?.terms_conditions || '';
+  const companyName = companyProfile?.company_name || invoiceSettings?.seller_name || 'Invoicing App';
+  const companyContact = [
+    companyProfile?.address || '',
+    [companyProfile?.mobile, companyProfile?.email].filter(Boolean).join(' | ')
+  ].filter(Boolean).join('<br>');
+  const logoPath = companyProfile?.logo_path || invoiceSettings?.seller_logo_path || '';
+  const logoUrl = logoPath ? `file:///${String(logoPath).replace(/\\/g, '/')}` : '';
   const items = invoice.items || [];
   const rows = items.map((it, i) => `
     <tr>
@@ -26,6 +34,8 @@ async function printInvoice(invoice) {
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family: Arial, sans-serif; font-size: 13px; color: #111; padding: 32px; }
     .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; padding-bottom:16px; border-bottom:2px solid #111; }
+    .company-header { display:flex; align-items:center; gap:10px; }
+    .company-logo { width:52px; height:52px; object-fit:contain; border:1px solid #e5e7eb; border-radius:8px; padding:4px; background:#fff; }
     .company-name { font-size:22px; font-weight:700; }
     .company-info { font-size:12px; color:#555; margin-top:4px; line-height:1.6; }
     .invoice-title { font-size:28px; font-weight:700; color:#111; text-align:right; }
@@ -51,8 +61,13 @@ async function printInvoice(invoice) {
   </style></head><body>
   <div class="header">
     <div>
-      <div class="company-name">Acme Electricals</div>
-      <div class="company-info">123 Market Street, Mumbai, India<br>+91-9876543210 | info@acme.com</div>
+      <div class="company-header">
+        ${logoUrl ? `<img class="company-logo" src="${logoUrl}" alt="Company Logo" />` : ''}
+        <div>
+          <div class="company-name">${companyName}</div>
+          <div class="company-info">${companyContact || '-'}</div>
+        </div>
+      </div>
     </div>
     <div>
       <div class="invoice-title">INVOICE</div>
@@ -143,7 +158,7 @@ function KebabMenu({ items }) {
 }
 
 // -- ViewInvoiceModal -------------------------------------------------------
-function ViewInvoiceModal({ invoiceId, onClose, onReturn }) {
+function ViewInvoiceModal({ invoiceId, onClose, onReturn, onMarkPaid }) {
   const [inv, setInv] = useState(null);
   useEffect(() => {
     window.electron.invoke('invoices:getById', { id: invoiceId }).then(setInv);
@@ -165,7 +180,17 @@ function ViewInvoiceModal({ invoiceId, onClose, onReturn }) {
             <div style={{ fontSize:12, color:'#64748b', marginTop:2 }}>{inv.invoice_date} &middot; <span style={{ color:statusColor, fontWeight:600 }}>{inv.status}</span></div>
           </div>
           <div style={{ display:'flex', gap:8 }}>
-            <button className="btn btn-outline btn-sm" onClick={() => printInvoice(inv)}>Print</button>
+            {inv.status === 'Draft' ? (
+              <button
+                className="btn btn-outline btn-sm"
+                style={{ color:'#16a34a', borderColor:'#16a34a' }}
+                onClick={() => { onClose(); onMarkPaid(inv); }}
+              >
+                Mark as Paid
+              </button>
+            ) : (
+              <button className="btn btn-outline btn-sm" onClick={() => printInvoice(inv)}>Print</button>
+            )}
             {(inv.status === 'Paid' || inv.status === 'Credit') && (
               <button className="btn btn-outline btn-sm" style={{ color:'#f97316', borderColor:'#f97316' }} onClick={() => { onClose(); onReturn(inv); }}>Return / Exchange</button>
             )}
@@ -240,31 +265,48 @@ function ViewInvoiceModal({ invoiceId, onClose, onReturn }) {
 // -- UpdatePaymentModal -----------------------------------------------------
 function UpdatePaymentModal({ invoice, onClose, onUpdated }) {
   const [mode, setMode] = useState('Cash');
-  const [amount, setAmount] = useState(invoice.grand_total - (invoice.paid_amount||0));
+  const alreadyPaid = invoice.status === 'Draft' ? 0 : Number(invoice.paid_amount || 0);
+  const outstanding = Math.max(0, Number(invoice.grand_total || 0) - alreadyPaid);
+  const [amount, setAmount] = useState(outstanding);
   const [saving, setSaving] = useState(false);
 
   async function confirm() {
     setSaving(true);
-    const r = await window.electron.invoke('invoices:updateStatus', { id: invoice.id, status: 'Paid', paid_amount: invoice.grand_total });
-    setSaving(false);
-    if (r.success) { toast.success('Payment recorded - Invoice marked Paid'); onUpdated(); onClose(); }
-    else toast.error(r.error || 'Failed');
+    try {
+      const r = await window.electron.invoke('invoices:updateStatus', { id: invoice.id, status: 'Paid', paid_amount: invoice.grand_total });
+      if (r.success) {
+        const full = await window.electron.invoke('invoices:getById', { id: invoice.id }).catch(() => null);
+        if (full) {
+          printInvoice(full);
+        }
+        toast.success('Payment recorded - Invoice marked Paid');
+        await onUpdated();
+        onClose();
+      } else {
+        toast.error(r.error || 'Failed');
+      }
+    } finally {
+      setSaving(false);
+    }
   }
-
-  const outstanding = Number(invoice.grand_total||0) - Number(invoice.paid_amount||0);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{ background:'#fff', borderRadius:14, width:440, padding:28, boxShadow:'0 20px 60px rgba(0,0,0,0.2)' }}>
         <div style={{ fontWeight:700, fontSize:17, marginBottom:4 }}>Record Payment</div>
         <div style={{ fontSize:12, color:'#64748b', marginBottom:20 }}>Invoice {invoice.invoice_no} &middot; {invoice.customer_name}</div>
+        <div style={{ background:'#f8fafc', border:'1px solid #e2e8f0', borderRadius:8, padding:10, marginBottom:12, fontSize:12, color:'#334155', lineHeight:1.6 }}>
+          <div><strong>Date:</strong> {invoice.invoice_date || '-'}</div>
+          <div><strong>Total:</strong> Rs.{Number(invoice.grand_total || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
+          <div><strong>Paid:</strong> Rs.{alreadyPaid.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
+        </div>
         <div style={{ background:'#fef9c3', border:'1px solid #fde68a', borderRadius:8, padding:12, marginBottom:20, fontSize:13 }}>
           Outstanding: <strong>Rs.{outstanding.toLocaleString('en-IN', {minimumFractionDigits:2})}</strong>
         </div>
         <div className="form-group">
           <label className="form-label">Payment Mode</label>
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-            {['Cash','Card','UPI','EFT'].map(m => (
+            {['Cash','Card'].map(m => (
               <button key={m} type="button" onClick={() => setMode(m)}
                 style={{ padding:'6px 16px', borderRadius:20, border:'1px solid', fontSize:12, cursor:'pointer', fontWeight:500,
                   background: mode===m?'#111':'#fff', color: mode===m?'#fff':'#64748b', borderColor: mode===m?'#111':'#e2e8f0' }}>
@@ -479,6 +521,51 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [draftId, setDraftId] = useState(null);
+  const [autoSaveState, setAutoSaveState] = useState({ status: 'idle', lastSavedAt: null });
+  const [recoverSnapshot, setRecoverSnapshot] = useState(null);
+
+  const autosaveKey = `invoice_autosave_${currentUser?.id || 'guest'}`;
+
+  function normalizeDraftItems(rawItems) {
+    if (!Array.isArray(rawItems)) return [];
+    return rawItems.map((it) => {
+      const qty = Number(it.qty || 0);
+      const rate = Number(it.rate || 0);
+      const discountPct = Number(it.discount_pct || 0);
+      const base = qty * rate;
+      const amount = Number(it.amount ?? (base - ((base * discountPct) / 100)));
+      return {
+        ...it,
+        product_id: it.product_id ?? null,
+        name: it.name || it.product_name || '',
+        sku: it.sku || it.product_code || '',
+        qty,
+        rate,
+        discount_pct: discountPct,
+        amount,
+      };
+    });
+  }
+
+  function applySnapshot(snapshot) {
+    if (!snapshot) return;
+    setInvoiceDate(snapshot.invoiceDate || new Date().toISOString().slice(0, 10));
+    setBranchId(snapshot.branchId || '');
+    setSellerId(snapshot.sellerId || '');
+    setCustomerName(snapshot.customerName || '');
+    setCustomerPhone(snapshot.customerPhone || '');
+    setCustomerAddress(snapshot.customerAddress || '');
+    setItems(normalizeDraftItems(snapshot.items));
+    setPaymentMode(snapshot.paymentMode || 'Cash');
+    setIsCreditSale(!!snapshot.isCreditSale);
+    setTaxPct(snapshot.taxPct || 0);
+    setDiscount(snapshot.discount || 0);
+    setNotes(snapshot.notes || '');
+  }
+
+  function clearAutosave() {
+    try { localStorage.removeItem(autosaveKey); } catch (e) {}
+  }
 
   useEffect(() => {
     window.electron.invoke('products:getAll', {}).then(d => setProducts(Array.isArray(d) ? d : []));
@@ -497,14 +584,82 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
       setIsCreditSale(!!initialDraft.is_credit_sale);
       setTaxPct(initialDraft.tax_pct || 0);
       setDiscount(initialDraft.discount || 0);
-      setNotes(initialDraft.notes || '');
-      if (Array.isArray(initialDraft.items)) setItems(initialDraft.items);
+      setNotes(initialDraft.notes || initialDraft.internal_notes || '');
+      setItems(normalizeDraftItems(initialDraft.items));
     } else {
       setInvoiceDate(new Date().toISOString().slice(0, 10));
       if (currentUser?.branch_id) setBranchId(String(currentUser.branch_id));
       if (currentUser?.id) setSellerId(String(currentUser.id));
+
+      try {
+        const raw = localStorage.getItem(autosaveKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.items?.length || parsed?.customerName || parsed?.notes) {
+            setRecoverSnapshot(parsed);
+          }
+        }
+      } catch (e) {}
     }
-  }, [initialDraft, currentUser]);
+  }, [initialDraft, currentUser, autosaveKey]);
+
+  useEffect(() => {
+    if (initialDraft && initialDraft.id) return;
+    if (recoverSnapshot) return;
+
+    const hasContent =
+      items.length > 0 ||
+      !!customerName ||
+      !!customerPhone ||
+      !!customerAddress ||
+      !!notes ||
+      Number(taxPct) > 0 ||
+      Number(discount) > 0;
+    if (!hasContent) return;
+
+    setAutoSaveState(prev => ({ ...prev, status: 'saving' }));
+    const timer = setTimeout(() => {
+      try {
+        const snapshot = {
+          invoiceDate,
+          branchId,
+          sellerId,
+          customerName,
+          customerPhone,
+          customerAddress,
+          items,
+          paymentMode,
+          isCreditSale,
+          taxPct,
+          discount,
+          notes,
+          savedAt: new Date().toISOString(),
+        };
+        localStorage.setItem(autosaveKey, JSON.stringify(snapshot));
+        setAutoSaveState({ status: 'saved', lastSavedAt: snapshot.savedAt });
+      } catch (e) {
+        setAutoSaveState(prev => ({ ...prev, status: 'error' }));
+      }
+    }, 1200);
+
+    return () => clearTimeout(timer);
+  }, [
+    initialDraft,
+    recoverSnapshot,
+    autosaveKey,
+    invoiceDate,
+    branchId,
+    sellerId,
+    customerName,
+    customerPhone,
+    customerAddress,
+    items,
+    paymentMode,
+    isCreditSale,
+    taxPct,
+    discount,
+    notes,
+  ]);
 
   const handleGunScan = useCallback(async (barcode) => {
     const p = await window.electron.invoke('products:findByBarcode', { barcode });
@@ -569,6 +724,7 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
   const grandTotal = subtotal + taxAmt - (parseFloat(discount) || 0);
 
   function resetForNewInvoice() {
+    clearAutosave();
     setDraftId(null);
     setInvoiceDate(new Date().toISOString().slice(0, 10));
     setBranchId(currentUser?.branch_id ? String(currentUser.branch_id) : '');
@@ -601,6 +757,7 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
       if (result.success) {
         if (status === 'Draft') {
           toast.success('Saved as draft');
+          clearAutosave();
           onSaved();
           onClose();
           return;
@@ -649,6 +806,11 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
           <div style={{ fontSize:12, color:'#64748b' }}>Fill in the details to generate a sales invoice</div>
         </div>
         <div style={{ marginLeft:'auto', display:'flex', gap:8 }}>
+          <div style={{ display:'flex', alignItems:'center', fontSize:12, color:'#6b7280', marginRight:8 }}>
+            {autoSaveState.status === 'saving' && 'Saving...'}
+            {autoSaveState.status === 'saved' && `Saved ${autoSaveState.lastSavedAt ? new Date(autoSaveState.lastSavedAt).toLocaleTimeString() : ''}`}
+            {autoSaveState.status === 'error' && 'Auto-save failed'}
+          </div>
           <button className="btn btn-outline" onClick={() => save('Draft')} disabled={saving}>Save Draft</button>
           <button className="btn btn-black" onClick={finalizeAndSave} disabled={saving}>
             {isCreditSale ? 'Save Credit Sale' : 'Finalize & Save'}
@@ -658,6 +820,18 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
 
       <div style={{ display:'flex', flex:1, gap:0 }}>
         <div style={{ flex:1, padding:24, overflowY:'auto', borderRight:'1px solid #f1f5f9' }}>
+          {recoverSnapshot && (
+            <div style={{ marginBottom:16, background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:10, padding:'12px 14px', display:'flex', justifyContent:'space-between', alignItems:'center', gap:12 }}>
+              <div style={{ fontSize:13, color:'#1e3a8a' }}>
+                Unsaved invoice draft found from {recoverSnapshot.savedAt ? new Date(recoverSnapshot.savedAt).toLocaleString() : 'previous session'}.
+              </div>
+              <div style={{ display:'flex', gap:8 }}>
+                <button className="btn btn-outline btn-sm" onClick={() => { clearAutosave(); setRecoverSnapshot(null); }}>Discard</button>
+                <button className="btn btn-black btn-sm" onClick={() => { applySnapshot(recoverSnapshot); setRecoverSnapshot(null); }}>Resume</button>
+              </div>
+            </div>
+          )}
+
           <div style={{ marginBottom:24 }}>
             <div style={{ fontWeight:600, marginBottom:12, fontSize:14 }}>Customer Details</div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:12 }}>
@@ -789,11 +963,13 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
 }
 
 // -- ReturnExchangeTab ------------------------------------------------------
-function ReturnExchangeTab({ onCreateReturn }) {
+function ReturnExchangeTab({ onCreateReturn, onPickInvoice, refreshNonce = 0 }) {
   const [returns, setReturns] = useState([]);
+  const [eligibleInvoices, setEligibleInvoices] = useState([]);
   const [search, setSearch] = useState('');
 
-  useEffect(() => { loadReturns(); }, [search]);
+  useEffect(() => { loadReturns(); }, [search, refreshNonce]);
+  useEffect(() => { loadEligibleInvoices(); }, [refreshNonce]);
 
   async function loadReturns() {
     try {
@@ -802,8 +978,26 @@ function ReturnExchangeTab({ onCreateReturn }) {
     } catch { setReturns([]); }
   }
 
+  async function loadEligibleInvoices() {
+    try {
+      const data = await window.electron.invoke('invoices:getAll', { status: 'Paid' });
+      const list = Array.isArray(data) ? data : [];
+      const eligible = list.filter((inv) => {
+        if (!inv?.invoice_date) return false;
+        const daysSince = Math.floor((Date.now() - new Date(inv.invoice_date).getTime()) / 86400000);
+        return daysSince <= 15;
+      });
+      setEligibleInvoices(eligible);
+    } catch {
+      setEligibleInvoices([]);
+    }
+  }
+
   const filtered = returns.filter(r =>
     !search || (r.invoice_no||'').toLowerCase().includes(search.toLowerCase()) || (r.customer_name||'').toLowerCase().includes(search.toLowerCase())
+  );
+  const eligibleFiltered = eligibleInvoices.filter((inv) =>
+    !search || (inv.invoice_no || '').toLowerCase().includes(search.toLowerCase()) || (inv.customer_name || '').toLowerCase().includes(search.toLowerCase())
   );
 
   return (
@@ -815,6 +1009,27 @@ function ReturnExchangeTab({ onCreateReturn }) {
         <button className="btn btn-black filters-bar-right" onClick={onCreateReturn}>+ Create Return / Exchange</button>
       </div>
       <div className="table-container">
+        <div style={{ padding:'10px 14px', fontWeight:600, fontSize:13, color:'#334155' }}>Eligible Paid Invoices (within 15 days)</div>
+        <table className="data-table" style={{ marginBottom:14 }}>
+          <thead>
+            <tr><th>S.No</th><th>Invoice No.</th><th>Customer</th><th>Date</th><th>Total</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            {eligibleFiltered.length === 0 && <tr><td colSpan={6} style={{ textAlign:'center', color:'#94a3b8', padding:20 }}>No eligible paid invoices found</td></tr>}
+            {eligibleFiltered.map((inv, i) => (
+              <tr key={`eligible-${inv.id}`}>
+                <td>{i + 1}</td>
+                <td style={{ fontWeight:600 }}>{inv.invoice_no}</td>
+                <td>{inv.customer_name || 'Walk-in'}</td>
+                <td>{inv.invoice_date}</td>
+                <td style={{ fontWeight:600 }}>Rs.{Number(inv.grand_total || 0).toLocaleString()}</td>
+                <td><button className="btn btn-outline btn-sm" onClick={() => onPickInvoice(inv)}>Create Return</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div style={{ padding:'6px 14px', fontWeight:600, fontSize:13, color:'#334155' }}>Return / Exchange Records</div>
         <table className="data-table">
           <thead>
             <tr><th>S.No</th><th>Original Invoice</th><th>Customer</th><th>Type</th><th>Items Returned</th><th>Refund Amount</th><th>Date</th><th>Status</th></tr>
@@ -845,27 +1060,35 @@ function ReturnPickerModal({ onClose, onPick }) {
   const [invoices, setInvoices] = useState([]);
   const [search, setSearch] = useState('');
 
+  function isWithinReturnWindow(invoiceDate) {
+    if (!invoiceDate) return false;
+    const daysSince = Math.floor((Date.now() - new Date(invoiceDate).getTime()) / 86400000);
+    return daysSince <= 15;
+  }
+
   useEffect(() => {
     window.electron.invoke('invoices:getAll', { status: 'Paid' })
       .then(d => setInvoices(Array.isArray(d) ? d : []));
   }, []);
 
-  const filtered = invoices.filter(inv =>
-    !search || (inv.invoice_no||'').toLowerCase().includes(search.toLowerCase()) || (inv.customer_name||'').toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = invoices.filter((inv) => {
+    if (!isWithinReturnWindow(inv.invoice_date)) return false;
+    if (inv.status !== 'Paid') return false;
+    return !search || (inv.invoice_no || '').toLowerCase().includes(search.toLowerCase()) || (inv.customer_name || '').toLowerCase().includes(search.toLowerCase());
+  });
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{ background:'#fff', borderRadius:16, width:560, maxHeight:'80vh', display:'flex', flexDirection:'column', boxShadow:'0 24px 80px rgba(0,0,0,0.2)' }}>
         <div style={{ padding:'20px 24px', borderBottom:'1px solid #f1f5f9' }}>
           <div style={{ fontWeight:700, fontSize:17 }}>Select Invoice to Return</div>
-          <div style={{ fontSize:12, color:'#64748b', marginTop:4 }}>Choose the original paid invoice</div>
+          <div style={{ fontSize:12, color:'#64748b', marginTop:4 }}>Choose a paid invoice from the last 15 days</div>
         </div>
         <div style={{ padding:'12px 24px', borderBottom:'1px solid #f1f5f9' }}>
           <input className="form-input" placeholder="Search invoice or customer..." value={search} onChange={e => setSearch(e.target.value)} />
         </div>
         <div style={{ overflowY:'auto', flex:1 }}>
-          {filtered.length === 0 && <div style={{ textAlign:'center', color:'#94a3b8', padding:32 }}>No paid invoices found</div>}
+          {filtered.length === 0 && <div style={{ textAlign:'center', color:'#94a3b8', padding:32 }}>No eligible paid invoices found (within 15 days)</div>}
           {filtered.map(inv => (
             <div key={inv.id} onClick={() => onPick(inv)}
               style={{ padding:'12px 24px', borderBottom:'1px solid #f8fafc', cursor:'pointer', display:'flex', justifyContent:'space-between', alignItems:'center' }}
@@ -899,14 +1122,21 @@ export default function BillingInvoice() {
   const [returnInvoice, setReturnInvoice] = useState(null);
   const [payInvoice, setPayInvoice] = useState(null);
   const [showReturnPicker, setShowReturnPicker] = useState(false);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const { can } = useAuth();
 
-  useEffect(() => { loadInvoices(); }, [search, statusFilter]);
+  function isOlderThan15Days(invoiceDate) {
+    if (!invoiceDate) return false;
+    return (Date.now() - new Date(invoiceDate).getTime()) > (15 * 86400000);
+  }
+
+  useEffect(() => { loadInvoices(); }, [search, statusFilter, activeTab]);
 
   async function loadInvoices() {
     try {
       await window.electron.invoke('invoices:autoComplete', {}).catch(() => {});
-      const data = await window.electron.invoke('invoices:getAll', { status: statusFilter === 'All' ? null : statusFilter, search });
+      const statusParam = activeTab === 'Completed' ? null : (statusFilter === 'All' ? null : statusFilter);
+      const data = await window.electron.invoke('invoices:getAll', { status: statusParam, search });
       setInvoices(Array.isArray(data) ? data : []);
     } catch { setInvoices([]); }
   }
@@ -920,14 +1150,33 @@ export default function BillingInvoice() {
 
   function handleCreateClick() { setShowStartModal(true); }
   function handleNewInvoice() { setShowStartModal(false); setShowCreate(true); }
-  function handleResumeDraft(draft) { setShowStartModal(false); setShowCreate(draft); }
+  async function handleResumeDraft(draft) {
+    setShowStartModal(false);
+    if (!draft?.id) {
+      setShowCreate(draft || true);
+      return;
+    }
+    try {
+      const fullDraft = await window.electron.invoke('invoices:getById', { id: draft.id });
+      setShowCreate(fullDraft || draft);
+    } catch {
+      setShowCreate(draft);
+    }
+  }
 
   function openReturnPicker() { setShowReturnPicker(true); }
+  async function handlePaymentUpdated() {
+    setStatusFilter('All');
+    setSearch('');
+    setActiveTab('Invoices');
+    await loadInvoices();
+    setRefreshNonce((n) => n + 1);
+  }
 
   const displayList = activeTab === 'Completed'
-    ? invoices.filter(inv => ['Completed','Paid'].includes(inv.status))
+    ? invoices.filter((inv) => inv.status === 'Completed' || (isOlderThan15Days(inv.invoice_date) && ['Paid', 'Credit', 'Active'].includes(inv.status)))
     : activeTab === 'Invoices'
-    ? invoices.filter(inv => !['Completed'].includes(inv.status))
+    ? invoices.filter((inv) => inv.status !== 'Completed' && !(isOlderThan15Days(inv.invoice_date) && ['Paid', 'Credit', 'Active'].includes(inv.status)))
     : invoices;
 
   if (showCreate && showCreate !== true) {
@@ -946,6 +1195,7 @@ export default function BillingInvoice() {
           invoiceId={viewInvoice}
           onClose={() => setViewInvoice(null)}
           onReturn={inv => { setViewInvoice(null); setReturnInvoice(inv); }}
+          onMarkPaid={inv => { setViewInvoice(null); setPayInvoice(inv); }}
         />
       )}
 
@@ -953,7 +1203,7 @@ export default function BillingInvoice() {
         <UpdatePaymentModal
           invoice={payInvoice}
           onClose={() => setPayInvoice(null)}
-          onUpdated={loadInvoices}
+          onUpdated={handlePaymentUpdated}
         />
       )}
 
@@ -983,7 +1233,7 @@ export default function BillingInvoice() {
         ))}
       </div>
 
-      {activeTab === 'Return & Exchange' && <ReturnExchangeTab onCreateReturn={openReturnPicker} />}
+      {activeTab === 'Return & Exchange' && <ReturnExchangeTab refreshNonce={refreshNonce} onCreateReturn={openReturnPicker} onPickInvoice={(inv) => setReturnInvoice(inv)} />}
 
       {(activeTab === 'Invoices' || activeTab === 'Completed') && (
         <>
@@ -1027,12 +1277,14 @@ export default function BillingInvoice() {
                     <td>
                       <KebabMenu items={[
                         { label:'View Details', icon:'[+]', action:() => setViewInvoice(inv.id) },
-                        { label:'Print', icon:'[P]', action:async () => {
-                          const full = await window.electron.invoke('invoices:getById', { id: inv.id });
-                          printInvoice(full);
-                        }},
-                        ...(inv.status === 'Credit' ? [{ label:'Mark as Paid', icon:'[$]', action:() => setPayInvoice(inv) }] : []),
-                        ...((inv.status === 'Paid' || inv.status === 'Credit') ? [{ label:'Return / Exchange', icon:'[R]', action:() => setReturnInvoice(inv) }] : []),
+                        ...(inv.status !== 'Draft' ? [{
+                          label:'Print', icon:'[P]', action:async () => {
+                            const full = await window.electron.invoke('invoices:getById', { id: inv.id });
+                            printInvoice(full);
+                          }
+                        }] : []),
+                        ...((inv.status === 'Credit' || inv.status === 'Draft') ? [{ label:'Mark as Paid', icon:'[$]', action:() => setPayInvoice(inv) }] : []),
+                        ...((inv.status === 'Paid' && !isOlderThan15Days(inv.invoice_date)) ? [{ label:'Return / Exchange', icon:'[R]', action:() => setReturnInvoice(inv) }] : []),
                         { label:'Delete', icon:'[X]', action:() => deleteInvoice(inv.id), danger:true },
                       ]} />
                     </td>

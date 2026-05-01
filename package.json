@@ -1,6 +1,6 @@
 {
   "name": "electronic-invoicing-app",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Electronic Invoicing Desktop App built with Electron + React + SQLite",
   "author": "Invoicing App",
   "main": "src/main/main.js",
