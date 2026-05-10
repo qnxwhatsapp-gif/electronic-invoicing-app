@@ -196,6 +196,131 @@ async function printInvoice(invoice) {
   // Preview-first flow: user can inspect, then print via button or Ctrl/Cmd+P.
 }
 
+// -- Print Return/Exchange --------------------------------------------------
+async function printReturnExchange(invoice, payload) {
+  const invoiceSettings = await window.electron.invoke('invoiceSettings:get', {}).catch(() => null);
+  const companyProfile = await window.electron.invoke('settings:getCompany', {}).catch(() => null);
+
+  const companyName = invoiceSettings?.seller_name || companyProfile?.company_name || 'Invoicing App';
+  const companyContact = [
+    invoiceSettings?.seller_address || companyProfile?.address || '',
+    [invoiceSettings?.seller_phone || companyProfile?.mobile, invoiceSettings?.seller_email || companyProfile?.email].filter(Boolean).join(' | '),
+  ].filter(Boolean).join('<br>');
+  const templateColor = invoiceSettings?.template_color || '#111111';
+  const printedAt = new Date();
+  const printedDate = printedAt.toISOString().slice(0, 10);
+  const printedTime = printedAt.toLocaleTimeString();
+
+  const returnRows = (payload.returnItems || []).map((it, idx) => `
+    <tr>
+      <td>${idx + 1}</td>
+      <td>${it.product_name || it.name || ''}</td>
+      <td style="text-align:center">${Number(it.returned_qty || 0)}</td>
+      <td style="text-align:right">Rs.${Number(it.rate || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+      <td style="text-align:right">Rs.${Number((it.returned_qty || 0) * (it.rate || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+    </tr>
+  `).join('');
+
+  const exchangeRows = (payload.exchangeItems || []).map((it, idx) => `
+    <tr>
+      <td>${idx + 1}</td>
+      <td>${it.product_name || it.name || ''}</td>
+      <td style="text-align:center">${Number(it.qty || 0)}</td>
+      <td style="text-align:right">Rs.${Number(it.rate || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+      <td style="text-align:right">Rs.${Number((it.qty || 0) * (it.rate || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+    </tr>
+  `).join('');
+
+  const html = `<!DOCTYPE html><html><head><title>${payload.type} ${payload.returnId || ''}</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family: Arial, sans-serif; font-size: 13px; color: #111; padding: 32px; }
+    .preview-toolbar { display:flex; justify-content:flex-end; gap:8px; margin-bottom:14px; }
+    .preview-btn { padding:8px 14px; border:1px solid #d1d5db; border-radius:8px; background:#fff; cursor:pointer; font-size:12px; font-weight:600; }
+    .preview-btn.primary { background:${templateColor}; color:#fff; border-color:${templateColor}; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px; padding-bottom:14px; border-bottom:2px solid ${templateColor}; }
+    .company-name { font-size:22px; font-weight:700; }
+    .company-info { font-size:12px; color:#555; margin-top:4px; line-height:1.6; }
+    .doc-title { font-size:24px; font-weight:700; color:${templateColor}; text-align:right; }
+    .meta { font-size:12px; text-align:right; color:#555; margin-top:4px; line-height:1.8; }
+    .box { background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 14px; margin-bottom:12px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 16px; }
+    th { background:${templateColor}; color:#fff; padding:10px 12px; text-align:left; font-size:12px; }
+    td { padding:9px 12px; border-bottom:1px solid #f1f5f9; font-size:13px; }
+    .summary { margin-left:auto; width:320px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; }
+    .row { display:flex; justify-content:space-between; padding:4px 0; }
+    .grand { font-weight:700; font-size:15px; border-top:2px solid ${templateColor}; margin-top:6px; padding-top:8px; }
+    .green { color:#16a34a; } .red { color:#ef4444; }
+    @media print { body { padding:16px; } .preview-toolbar { display:none; } }
+  </style></head><body>
+  <div class="preview-toolbar">
+    <button class="preview-btn" onclick="window.close()">Close</button>
+    <button class="preview-btn primary" onclick="window.print()">Print (Ctrl/Cmd+P)</button>
+  </div>
+  <div class="header">
+    <div>
+      <div class="company-name">${companyName}</div>
+      <div class="company-info">${companyContact || '-'}</div>
+    </div>
+    <div>
+      <div class="doc-title">${payload.type === 'Exchange' ? 'EXCHANGE MEMO' : 'RETURN MEMO'}</div>
+      <div class="meta">
+        Ref: RE-${payload.returnId || '-'}<br>
+        Printed: ${printedDate} ${printedTime}<br>
+        Original Invoice: ${invoice.invoice_no || '-'}
+      </div>
+    </div>
+  </div>
+  <div class="box">
+    <div><strong>Customer:</strong> ${invoice.customer_name || 'Walk-in Customer'}</div>
+    <div><strong>Phone:</strong> ${invoice.customer_phone || '-'}</div>
+    <div><strong>Invoice Date:</strong> ${invoice.invoice_date || '-'}</div>
+  </div>
+
+  <div style="font-weight:700; margin-top:2px;">Returned Items</div>
+  <table>
+    <thead><tr><th>#</th><th>Product</th><th style="text-align:center">Qty</th><th style="text-align:right">Rate</th><th style="text-align:right">Value</th></tr></thead>
+    <tbody>${returnRows || '<tr><td colspan="5" style="text-align:center;color:#94a3b8">No returned items</td></tr>'}</tbody>
+  </table>
+
+  ${payload.type === 'Exchange' ? `
+    <div style="font-weight:700; margin-top:2px;">Exchange Items</div>
+    <table>
+      <thead><tr><th>#</th><th>Product</th><th style="text-align:center">Qty</th><th style="text-align:right">Rate</th><th style="text-align:right">Value</th></tr></thead>
+      <tbody>${exchangeRows || '<tr><td colspan="5" style="text-align:center;color:#94a3b8">No exchange items</td></tr>'}</tbody>
+    </table>
+  ` : ''}
+
+  <div class="summary">
+    <div class="row"><span>Return Value</span><span class="red">Rs.${Number(payload.returnTotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>
+    ${payload.type === 'Exchange' ? `<div class="row"><span>Exchange Value</span><span>Rs.${Number(payload.exchangeTotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></div>` : ''}
+    <div class="row grand"><span>${payload.type === 'Exchange' ? 'Net Difference' : 'Refund Due'}</span>
+      <span class="${Number(payload.netDifference || 0) > 0 ? 'green' : 'red'}">
+        ${payload.type === 'Exchange'
+          ? (Number(payload.netDifference || 0) > 0
+              ? `+Rs.${Number(payload.netDifference || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })} (customer paid)`
+              : Number(payload.netDifference || 0) < 0
+              ? `-Rs.${Math.abs(Number(payload.netDifference || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2 })} (refund)`
+              : 'Rs.0.00')
+          : `Rs.${Number(payload.returnTotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+        }
+      </span>
+    </div>
+  </div>
+  <script>
+    document.addEventListener('keydown', function(e) {
+      const k = (e.key || '').toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && k === 'p') { e.preventDefault(); window.print(); }
+      if (k === 'escape') { e.preventDefault(); window.close(); }
+    });
+  </script>
+  </body></html>`;
+
+  const win = window.open('', '_blank', 'width=900,height=740');
+  win.document.write(html);
+  win.document.close();
+}
+
 // -- KebabMenu --------------------------------------------------------------
 function KebabMenu({ items }) {
   const [open, setOpen] = useState(false);
@@ -409,6 +534,10 @@ function UpdatePaymentModal({ invoice, onClose, onUpdated }) {
 function ReturnExchangeModal({ invoice, onClose, onSaved }) {
   const [type, setType] = useState('Return');
   const [items, setItems] = useState([]);
+  const [allProducts, setAllProducts] = useState([]);
+  const [exchangeItems, setExchangeItems] = useState([]);
+  const [exchangeSearch, setExchangeSearch] = useState('');
+  const [exchangeSuggestions, setExchangeSuggestions] = useState([]);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -417,6 +546,7 @@ function ReturnExchangeModal({ invoice, onClose, onSaved }) {
         setItems(inv.items.map(it => ({ ...it, returned_qty: 0, max_qty: it.qty })));
       }
     });
+    window.electron.invoke('products:getAll', {}).then(d => setAllProducts(Array.isArray(d) ? d : []));
   }, [invoice.id]);
 
   function setQty(idx, val) {
@@ -424,13 +554,64 @@ function ReturnExchangeModal({ invoice, onClose, onSaved }) {
   }
 
   const returnItems = items.filter(it => it.returned_qty > 0);
-  const refundTotal = returnItems.reduce((s, it) => s + (it.returned_qty * it.rate), 0);
+  const returnTotal = returnItems.reduce((s, it) => s + (it.returned_qty * it.rate), 0);
+  const exchangeTotal = exchangeItems.reduce((s, it) => s + it.amount, 0);
+  const netDifference = exchangeTotal - returnTotal; // +ve customer pays more, -ve refund.
 
   const daysSince = Math.floor((Date.now() - new Date(invoice.invoice_date).getTime()) / 86400000);
   const overdue = daysSince > 15;
 
+  function onSearchExchange(val) {
+    setExchangeSearch(val);
+    if (!val.trim()) { setExchangeSuggestions([]); return; }
+    const q = val.toLowerCase();
+    setExchangeSuggestions(
+      allProducts
+        .filter(p => p.name?.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q))
+        .slice(0, 8)
+    );
+  }
+
+  function addExchangeItem(product) {
+    setExchangeItems(prev => {
+      const idx = prev.findIndex(i => i.product_id === product.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        const qty = next[idx].qty + 1;
+        next[idx] = { ...next[idx], qty, amount: qty * next[idx].rate };
+        return next;
+      }
+      const rate = Number(product.selling_price || 0);
+      return [...prev, {
+        product_id: product.id,
+        product_name: product.name,
+        sku: product.sku,
+        qty: 1,
+        rate,
+        amount: rate,
+      }];
+    });
+    setExchangeSearch('');
+    setExchangeSuggestions([]);
+  }
+
+  function updateExchangeItem(idx, field, value) {
+    setExchangeItems(prev => {
+      const next = [...prev];
+      const parsed = Math.max(0, parseFloat(value) || 0);
+      next[idx] = { ...next[idx], [field]: parsed };
+      next[idx].amount = (next[idx].qty || 0) * (next[idx].rate || 0);
+      return next;
+    });
+  }
+
+  function removeExchangeItem(idx) {
+    setExchangeItems(prev => prev.filter((_, i) => i !== idx));
+  }
+
   async function submit() {
     if (returnItems.length === 0) { toast.error('Select at least one item to return'); return; }
+    if (type === 'Exchange' && exchangeItems.length === 0) { toast.error('Add at least one exchange item'); return; }
     setSaving(true);
     const r = await window.electron.invoke('returns:create', {
       original_invoice_id: invoice.id,
@@ -439,15 +620,34 @@ function ReturnExchangeModal({ invoice, onClose, onSaved }) {
       type,
       total_items_sold: items.reduce((s, it) => s + it.qty, 0),
       items_returned: returnItems.reduce((s, it) => s + it.returned_qty, 0),
-      return_amount: refundTotal,
-      exchange_amount: 0,
-      net_amount: refundTotal,
+      return_amount: returnTotal,
+      exchange_amount: type === 'Exchange' ? exchangeTotal : 0,
+      net_amount: type === 'Exchange' ? netDifference : -returnTotal,
       status: 'Completed',
       created_by: null,
       items: returnItems.map(it => ({ product_id: it.product_id, product_name: it.product_name||it.name, returned_qty: it.returned_qty, exchange_qty: 0, rate: it.rate })),
+      exchange_items: type === 'Exchange' ? exchangeItems.map(it => ({
+        product_id: it.product_id,
+        product_name: it.product_name || it.name,
+        qty: it.qty,
+        rate: it.rate,
+      })) : [],
     });
     setSaving(false);
-    if (r.success) { toast.success(`${type} recorded successfully`); onSaved(); onClose(); }
+    if (r.success) {
+      await printReturnExchange(invoice, {
+        type,
+        returnId: r.id,
+        returnItems,
+        exchangeItems,
+        returnTotal,
+        exchangeTotal,
+        netDifference,
+      });
+      toast.success(`${type} recorded successfully`);
+      onSaved();
+      onClose();
+    }
     else toast.error(r.error || 'Failed to record return');
   }
 
@@ -505,10 +705,75 @@ function ReturnExchangeModal({ invoice, onClose, onSaved }) {
             </table>
           </div>
 
-          {refundTotal > 0 && (
-            <div style={{ background:'#fef2f2', border:'1px solid #fecaca', borderRadius:8, padding:'12px 16px', display:'flex', justifyContent:'space-between', marginBottom:16 }}>
-              <span style={{ fontWeight:600 }}>Total {type === 'Return' ? 'Refund' : 'Credit'}</span>
-              <span style={{ fontWeight:700, fontSize:17, color:'#ef4444' }}>Rs.{refundTotal.toLocaleString('en-IN', {minimumFractionDigits:2})}</span>
+          {type === 'Exchange' && (
+            <div style={{ marginBottom:16, border:'1px solid #e2e8f0', borderRadius:10, padding:12 }}>
+              <label className="form-label">Add Exchange Items</label>
+              <div style={{ position:'relative', marginBottom:10 }}>
+                <input
+                  className="form-input"
+                  placeholder="Search replacement product by name or SKU..."
+                  value={exchangeSearch}
+                  onChange={e => onSearchExchange(e.target.value)}
+                />
+                {exchangeSuggestions.length > 0 && (
+                  <div style={{ position:'absolute', left:0, right:0, top:'100%', background:'#fff', border:'1px solid #e2e8f0', borderRadius:8, zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.1)', maxHeight:220, overflowY:'auto' }}>
+                    {exchangeSuggestions.map(p => (
+                      <div key={p.id} onClick={() => addExchangeItem(p)}
+                        style={{ padding:'10px 14px', cursor:'pointer', display:'flex', justifyContent:'space-between', borderBottom:'1px solid #f1f5f9', fontSize:13 }}
+                        onMouseEnter={e => e.currentTarget.style.background='#f8fafc'}
+                        onMouseLeave={e => e.currentTarget.style.background='#fff'}>
+                        <span>{p.name} <span style={{ color:'#94a3b8', fontSize:11 }}>{p.sku}</span></span>
+                        <span style={{ fontWeight:600 }}>Rs.{Number(p.selling_price || 0).toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <table className="data-table" style={{ fontSize:13 }}>
+                <thead>
+                  <tr><th>Product</th><th>SKU</th><th style={{width:90}}>Qty</th><th style={{width:110}}>Rate</th><th style={{textAlign:'right'}}>Amount</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {exchangeItems.length === 0 && <tr><td colSpan={6} style={{textAlign:'center', color:'#94a3b8', padding:16}}>No exchange items added</td></tr>}
+                  {exchangeItems.map((it, idx) => (
+                    <tr key={`${it.product_id}-${idx}`}>
+                      <td>{it.product_name}</td>
+                      <td style={{color:'#64748b'}}>{it.sku || '-'}</td>
+                      <td><input type="number" min={1} className="form-input" style={{ width:70, padding:'4px 8px' }} value={it.qty} onChange={e => updateExchangeItem(idx, 'qty', e.target.value)} /></td>
+                      <td><input type="number" min={0} className="form-input" style={{ width:90, padding:'4px 8px' }} value={it.rate} onChange={e => updateExchangeItem(idx, 'rate', e.target.value)} /></td>
+                      <td style={{textAlign:'right', fontWeight:600}}>Rs.{Number(it.amount || 0).toLocaleString()}</td>
+                      <td><button onClick={() => removeExchangeItem(idx)} style={{ background:'none', border:'none', cursor:'pointer', color:'#ef4444', fontSize:16, fontWeight:700 }}>x</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {returnTotal > 0 && (
+            <div style={{ background:'#f8fafc', border:'1px solid #e2e8f0', borderRadius:8, padding:'12px 16px', marginBottom:16 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
+                <span style={{ fontWeight:600, color:'#334155' }}>Return Value</span>
+                <span style={{ fontWeight:700, color:'#ef4444' }}>Rs.{returnTotal.toLocaleString('en-IN', {minimumFractionDigits:2})}</span>
+              </div>
+              {type === 'Exchange' && (
+                <>
+                  <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
+                    <span style={{ fontWeight:600, color:'#334155' }}>Exchange Value</span>
+                    <span style={{ fontWeight:700, color:'#111827' }}>Rs.{exchangeTotal.toLocaleString('en-IN', {minimumFractionDigits:2})}</span>
+                  </div>
+                  <div style={{ height:1, background:'#e2e8f0', margin:'8px 0' }} />
+                  <div style={{ display:'flex', justifyContent:'space-between' }}>
+                    <span style={{ fontWeight:700 }}>Net Difference</span>
+                    <span style={{ fontWeight:700, fontSize:17, color: netDifference > 0 ? '#16a34a' : netDifference < 0 ? '#ef4444' : '#111827' }}>
+                      {netDifference > 0 ? `+Rs.${netDifference.toLocaleString('en-IN', {minimumFractionDigits:2})} (customer pays)`
+                        : netDifference < 0 ? `-Rs.${Math.abs(netDifference).toLocaleString('en-IN', {minimumFractionDigits:2})} (refund)`
+                        : 'Rs.0.00'}
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -1040,7 +1305,7 @@ function CreateInvoiceForm({ onClose, onSaved, initialDraft }) {
 }
 
 // -- ReturnExchangeTab ------------------------------------------------------
-function ReturnExchangeTab({ onCreateReturn, onPickInvoice, refreshNonce = 0 }) {
+function ReturnExchangeTab({ onCreateReturn, onPickInvoice, onReprint, refreshNonce = 0 }) {
   const [returns, setReturns] = useState([]);
   const [eligibleInvoices, setEligibleInvoices] = useState([]);
   const [search, setSearch] = useState('');
@@ -1103,10 +1368,10 @@ function ReturnExchangeTab({ onCreateReturn, onPickInvoice, refreshNonce = 0 }) 
         <div style={{ padding:'6px 14px', fontWeight:600, fontSize:13, color:'#334155' }}>Return / Exchange Records</div>
         <table className="data-table">
           <thead>
-            <tr><th>S.No</th><th>Original Invoice</th><th>Customer</th><th>Type</th><th>Items Returned</th><th>Refund Amount</th><th>Date</th><th>Status</th></tr>
+            <tr><th>S.No</th><th>Original Invoice</th><th>Customer</th><th>Type</th><th>Items Returned</th><th>Refund Amount</th><th>Date</th><th>Status</th><th>Action</th></tr>
           </thead>
           <tbody>
-            {filtered.length === 0 && <tr><td colSpan={8} style={{ textAlign:'center', color:'#94a3b8', padding:32 }}>No returns or exchanges found</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={9} style={{ textAlign:'center', color:'#94a3b8', padding:32 }}>No returns or exchanges found</td></tr>}
             {filtered.map((r, i) => (
               <tr key={r.id}>
                 <td>{i+1}</td>
@@ -1117,6 +1382,9 @@ function ReturnExchangeTab({ onCreateReturn, onPickInvoice, refreshNonce = 0 }) 
                 <td style={{ fontWeight:600, color:'#ef4444' }}>Rs.{Number(r.return_amount||0).toLocaleString()}</td>
                 <td>{(r.date||r.created_at||'').split('T')[0]}</td>
                 <td><span className={`badge ${r.status === 'Completed' ? 'badge-green' : r.status === 'Partial' ? 'badge-orange' : 'badge-grey'}`}>{r.status}</span></td>
+                <td>
+                  <button className="btn btn-outline btn-sm" onClick={() => onReprint?.(r)}>Reprint</button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1236,6 +1504,36 @@ export default function BillingInvoice() {
   }
 
   function openReturnPicker() { setShowReturnPicker(true); }
+  async function handleReprintReturnExchange(record) {
+    if (!record?.id) return;
+    const fullReturn = await window.electron.invoke('returns:getById', { id: record.id }).catch(() => null);
+    if (!fullReturn) { toast.error('Unable to load return details'); return; }
+    const originalInvoice = await window.electron.invoke('invoices:getById', { id: fullReturn.original_invoice_id }).catch(() => null);
+    if (!originalInvoice) { toast.error('Original invoice not found'); return; }
+
+    const returnItems = (fullReturn.items || []).filter(it => Number(it.returned_qty || 0) > 0)
+      .map(it => ({
+        product_name: it.product_name,
+        returned_qty: Number(it.returned_qty || 0),
+        rate: Number(it.rate || 0),
+      }));
+    const exchangeItems = (fullReturn.items || []).filter(it => Number(it.exchange_qty || 0) > 0)
+      .map(it => ({
+        product_name: it.product_name,
+        qty: Number(it.exchange_qty || 0),
+        rate: Number(it.rate || 0),
+      }));
+
+    await printReturnExchange(originalInvoice, {
+      type: fullReturn.type || 'Return',
+      returnId: fullReturn.id,
+      returnItems,
+      exchangeItems,
+      returnTotal: Number(fullReturn.return_amount || 0),
+      exchangeTotal: Number(fullReturn.exchange_amount || 0),
+      netDifference: Number(fullReturn.net_amount || 0),
+    });
+  }
   async function handlePaymentUpdated() {
     setStatusFilter('All');
     setSearch('');
@@ -1304,7 +1602,14 @@ export default function BillingInvoice() {
         ))}
       </div>
 
-      {activeTab === 'Return & Exchange' && <ReturnExchangeTab refreshNonce={refreshNonce} onCreateReturn={openReturnPicker} onPickInvoice={(inv) => setReturnInvoice(inv)} />}
+      {activeTab === 'Return & Exchange' && (
+        <ReturnExchangeTab
+          refreshNonce={refreshNonce}
+          onCreateReturn={openReturnPicker}
+          onPickInvoice={(inv) => setReturnInvoice(inv)}
+          onReprint={handleReprintReturnExchange}
+        />
+      )}
 
       {(activeTab === 'Invoices' || activeTab === 'Completed') && (
         <>

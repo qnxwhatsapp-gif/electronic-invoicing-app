@@ -213,16 +213,42 @@ function PurchaseInvoiceForm({ vendors, onClose, onSaved }) {
   const [taxPct, setTaxPct] = useState(0);
   const [discount, setDiscount] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [showCreateProduct, setShowCreateProduct] = useState(false);
+  const [creatingProduct, setCreatingProduct] = useState(false);
+  const [newProductForm, setNewProductForm] = useState({
+    name: '',
+    purchase_price: '',
+    selling_price: '',
+    current_stock: 0,
+    unit: 'pcs',
+  });
 
   useEffect(() => {
-    window.electron.invoke('products:getAll', {}).then(data => setAllProducts(Array.isArray(data) ? data : []));
+    loadProducts();
   }, []);
+
+  async function loadProducts() {
+    const data = await window.electron.invoke('products:getAll', {});
+    setAllProducts(Array.isArray(data) ? data : []);
+  }
 
   function onSearch(val) {
     setSearch(val);
     if (!val.trim()) { setSuggestions([]); return; }
     const q = val.toLowerCase();
     setSuggestions(allProducts.filter(p => p.name?.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q)).slice(0, 8));
+  }
+
+  function openCreateProductPrefilled(name = '') {
+    setNewProductForm(prev => ({
+      ...prev,
+      name: (name || '').trim(),
+      purchase_price: prev.purchase_price || '',
+      selling_price: prev.selling_price || '',
+      current_stock: prev.current_stock ?? 0,
+      unit: prev.unit || 'pcs',
+    }));
+    setShowCreateProduct(true);
   }
 
   function addItem(product) {
@@ -249,6 +275,51 @@ function PurchaseInvoiceForm({ vendors, onClose, onSaved }) {
   }
 
   function removeItem(idx) { setItems(prev => prev.filter((_, i) => i !== idx)); }
+
+  function resetNewProductForm() {
+    setNewProductForm({
+      name: '',
+      purchase_price: '',
+      selling_price: '',
+      current_stock: 0,
+      unit: 'pcs',
+    });
+  }
+
+  async function handleCreateProduct() {
+    if (!newProductForm.name.trim()) {
+      toast.error('Product name is required');
+      return;
+    }
+    const purchasePrice = parseFloat(newProductForm.purchase_price) || 0;
+    const sellingPrice = parseFloat(newProductForm.selling_price) || purchasePrice;
+    setCreatingProduct(true);
+    try {
+      const createResult = await window.electron.invoke('products:create', {
+        name: newProductForm.name.trim(),
+        purchase_price: purchasePrice,
+        selling_price: sellingPrice,
+        current_stock: parseFloat(newProductForm.current_stock) || 0,
+        unit: newProductForm.unit || 'pcs',
+      });
+      if (!createResult?.success) {
+        toast.error(createResult?.error || 'Failed to create product');
+        return;
+      }
+
+      const updatedProducts = await window.electron.invoke('products:getAll', {});
+      const rows = Array.isArray(updatedProducts) ? updatedProducts : [];
+      setAllProducts(rows);
+      const created = rows.find(p => p.sku === createResult.sku) || rows.find(p => p.name === newProductForm.name.trim());
+      if (created) addItem(created);
+
+      toast.success('Product created and added to invoice');
+      setShowCreateProduct(false);
+      resetNewProductForm();
+    } finally {
+      setCreatingProduct(false);
+    }
+  }
 
   const subtotal = items.reduce((s, i) => s + i.amount, 0);
   const taxAmt = subtotal * (taxPct / 100);
@@ -313,7 +384,12 @@ function PurchaseInvoiceForm({ vendors, onClose, onSaved }) {
         <div style={{ marginBottom: 12 }}>
           <label className="form-label">Add Products</label>
           <div style={{ position: 'relative' }}>
-            <input className="form-input" placeholder="Search product by name or SKU..." value={search} onChange={e => onSearch(e.target.value)} />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input className="form-input" placeholder="Search product by name or SKU..." value={search} onChange={e => onSearch(e.target.value)} />
+              <button type="button" className="btn btn-outline" onClick={() => openCreateProductPrefilled(search)} style={{ whiteSpace: 'nowrap' }}>
+                + New Product
+              </button>
+            </div>
             {suggestions.length > 0 && (
               <div style={{ position: 'absolute', left: 0, right: 0, top: '100%', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, zIndex: 50, boxShadow: '0 4px 16px rgba(0,0,0,0.1)', maxHeight: 220, overflowY: 'auto' }}>
                 {suggestions.map(p => (
@@ -325,6 +401,19 @@ function PurchaseInvoiceForm({ vendors, onClose, onSaved }) {
                     <span style={{ fontWeight: 600 }}>Rs.{p.purchase_price?.toLocaleString()}</span>
                   </div>
                 ))}
+              </div>
+            )}
+            {!!search.trim() && suggestions.length === 0 && (
+              <div style={{ marginTop: 8, border: '1px dashed #cbd5e1', borderRadius: 8, padding: '8px 10px', background: '#f8fafc', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ fontSize: 12, color: '#64748b' }}>No product found for "<strong>{search.trim()}</strong>"</span>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  style={{ padding: '4px 10px', fontSize: 12 }}
+                  onClick={() => openCreateProductPrefilled(search)}
+                >
+                  Create "{search.trim()}"
+                </button>
               </div>
             )}
           </div>
@@ -388,6 +477,78 @@ function PurchaseInvoiceForm({ vendors, onClose, onSaved }) {
           </button>
         </div>
       </div>
+
+      {showCreateProduct && (
+        <div className="modal-overlay" onClick={() => { setShowCreateProduct(false); resetNewProductForm(); }}>
+          <div className="modal-card modal-sm" onClick={e => e.stopPropagation()} style={{ width: 460 }}>
+            <button className="modal-close" onClick={() => { setShowCreateProduct(false); resetNewProductForm(); }}>x</button>
+            <div className="modal-title">Create New Product</div>
+            <div className="modal-subtitle">Add a product without leaving purchase invoice</div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
+              <div style={{ gridColumn: '1 / span 2' }}>
+                <label className="form-label">Product Name *</label>
+                <input
+                  className="form-input"
+                  value={newProductForm.name}
+                  onChange={e => setNewProductForm(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="Enter product name"
+                />
+              </div>
+              <div>
+                <label className="form-label">Purchase Price</label>
+                <input
+                  type="number"
+                  min={0}
+                  className="form-input"
+                  value={newProductForm.purchase_price}
+                  onChange={e => setNewProductForm(prev => ({ ...prev, purchase_price: e.target.value }))}
+                  placeholder="0.00"
+                />
+              </div>
+              <div>
+                <label className="form-label">Selling Price</label>
+                <input
+                  type="number"
+                  min={0}
+                  className="form-input"
+                  value={newProductForm.selling_price}
+                  onChange={e => setNewProductForm(prev => ({ ...prev, selling_price: e.target.value }))}
+                  placeholder="0.00"
+                />
+              </div>
+              <div>
+                <label className="form-label">Opening Stock</label>
+                <input
+                  type="number"
+                  min={0}
+                  className="form-input"
+                  value={newProductForm.current_stock}
+                  onChange={e => setNewProductForm(prev => ({ ...prev, current_stock: e.target.value }))}
+                  placeholder="0"
+                />
+              </div>
+              <div>
+                <label className="form-label">Unit</label>
+                <select
+                  className="form-select"
+                  value={newProductForm.unit}
+                  onChange={e => setNewProductForm(prev => ({ ...prev, unit: e.target.value }))}
+                >
+                  {['pcs', 'kg', 'g', 'ltr', 'ml', 'box', 'dozen', 'meter'].map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button className="btn btn-outline" onClick={() => { setShowCreateProduct(false); resetNewProductForm(); }}>Cancel</button>
+              <button className="btn btn-black" onClick={handleCreateProduct} disabled={creatingProduct}>
+                {creatingProduct ? 'Creating...' : 'Create & Add'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -504,6 +665,81 @@ function PurchaseReturnModal({ purchase, onClose, onDone }) {
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function ResolvePurchaseReturnModal({ record, onClose, onSaved }) {
+  const [resolutionType, setResolutionType] = useState('refund');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    setSaving(true);
+    try {
+      const res = await window.electron.invoke('purchases:updateReturnStatus', {
+        id: record.id,
+        resolution_type: resolutionType,
+        notes,
+      });
+      if (res?.success) {
+        toast.success(resolutionType === 'refund' ? 'Return resolved as refund' : 'Return resolved as replacement');
+        onSaved?.();
+        onClose?.();
+      } else {
+        toast.error(res?.error || 'Failed to resolve return');
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card modal-sm" onClick={e => e.stopPropagation()} style={{ width: 520 }}>
+        <button className="modal-close" onClick={onClose}>x</button>
+        <div className="modal-title">Resolve Purchase Return</div>
+        <div className="modal-subtitle">
+          {record.po_number || '-'} &middot; {record.vendor_name || record.vname || '-'} &middot; Rs.{Number(record.return_total || 0).toLocaleString('en-IN')}
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <label className="form-label">Resolution Type</label>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button
+              className="btn btn-outline"
+              onClick={() => setResolutionType('refund')}
+              style={{ flex: 1, borderColor: resolutionType === 'refund' ? '#111' : '#e5e7eb', color: resolutionType === 'refund' ? '#111' : '#6b7280' }}
+            >
+              Refund Money
+            </button>
+            <button
+              className="btn btn-outline"
+              onClick={() => setResolutionType('replacement')}
+              style={{ flex: 1, borderColor: resolutionType === 'replacement' ? '#111' : '#e5e7eb', color: resolutionType === 'replacement' ? '#111' : '#6b7280' }}
+            >
+              Same Items Replaced
+            </button>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 12, color: '#64748b' }}>
+            {resolutionType === 'refund'
+              ? 'Refund mode: amount is added to cash/bank accounting.'
+              : 'Replacement mode: same returned quantity is added back to inventory.'}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 14 }}>
+          <label className="form-label">Notes (optional)</label>
+          <textarea className="form-input" rows={3} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Reference / remarks..." style={{ resize: 'vertical' }} />
+        </div>
+
+        <div className="modal-footer">
+          <button className="btn btn-outline" onClick={onClose}>Cancel</button>
+          <button className="btn btn-black" onClick={submit} disabled={saving}>
+            {saving ? 'Saving...' : 'Mark Completed'}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -637,6 +873,7 @@ export default function VendorsPurchases() {
   const [payBillDefaults, setPayBillDefaults] = useState({});
   const [showReturnModal, setShowReturnModal] = useState(false);
   const [returnPurchase, setReturnPurchase] = useState(null);
+  const [resolveReturnRecord, setResolveReturnRecord] = useState(null);
   const [viewPurchase, setViewPurchase] = useState(null);
   const [viewVendor, setViewVendor] = useState(null);
   const [vendorForm, setVendorForm] = useState({ vendor_name: '', company_name: '', email: '', phone: '', street_address: '', city: '', province_state: '', postal_code: '', account_name: '', account_number: '' });
@@ -768,6 +1005,13 @@ export default function VendorsPurchases() {
           purchase={returnPurchase}
           onClose={() => { setShowReturnModal(false); setReturnPurchase(null); }}
           onDone={loadAll}
+        />
+      )}
+      {resolveReturnRecord && (
+        <ResolvePurchaseReturnModal
+          record={resolveReturnRecord}
+          onClose={() => setResolveReturnRecord(null)}
+          onSaved={loadAll}
         />
       )}
       {showPayBill && (
@@ -918,11 +1162,11 @@ export default function VendorsPurchases() {
           <div className="table-container">
             <table className="data-table">
               <thead>
-                <tr><th>S.No</th><th>Original PO</th><th>Vendor</th><th>Return Reason</th><th>Return Qty</th><th>Refund Amount</th><th>Date</th><th>Status</th></tr>
+                <tr><th>S.No</th><th>Original PO</th><th>Vendor</th><th>Return Reason</th><th>Return Qty</th><th>Refund Amount</th><th>Date</th><th>Status</th><th>Action</th></tr>
               </thead>
               <tbody>
                 {filteredReturns.length === 0 && (
-                  <tr><td colSpan={8} style={{ textAlign: 'center', color: '#94a3b8', padding: 32 }}>No purchase returns found</td></tr>
+                  <tr><td colSpan={9} style={{ textAlign: 'center', color: '#94a3b8', padding: 32 }}>No purchase returns found</td></tr>
                 )}
                 {filteredReturns.map((r, i) => (
                   <tr key={r.id}>
@@ -934,6 +1178,17 @@ export default function VendorsPurchases() {
                     <td style={{ fontWeight: 600, color: '#ef4444' }}>Rs.{Number(r.return_total||0).toLocaleString()}</td>
                     <td>{(r.order_date || '').split('T')[0]}</td>
                     <td><span className={`badge ${r.status === 'Completed' ? 'badge-green' : 'badge-grey'}`}>{r.status || 'Pending'}</span></td>
+                    <td>
+                      {r.status !== 'Completed' ? (
+                        <button className="btn btn-outline btn-sm" onClick={() => setResolveReturnRecord(r)}>
+                          Resolve
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: 12, color: '#64748b' }}>
+                          {r.resolution_type === 'refund' ? 'Refunded' : r.resolution_type === 'replacement' ? 'Replaced' : 'Completed'}
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

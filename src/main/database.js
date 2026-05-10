@@ -109,6 +109,7 @@ function createTables() {
       current_stock  INTEGER DEFAULT 0,
       reorder_level  INTEGER DEFAULT 10,
       barcode        TEXT,
+      description    TEXT,
       status         TEXT DEFAULT 'Good',
       is_active      INTEGER DEFAULT 1,
       created_at     TEXT DEFAULT (datetime('now'))
@@ -263,6 +264,9 @@ function createTables() {
       restocking_fee_pct  REAL DEFAULT 0,
       return_reason       TEXT,
       status              TEXT DEFAULT 'Pending',
+      resolution_type     TEXT,
+      resolution_notes    TEXT,
+      resolved_at         TEXT,
       order_date          TEXT DEFAULT (datetime('now'))
     );
 
@@ -390,12 +394,18 @@ function runMigrations() {
   try { db.exec(`ALTER TABLE users ADD COLUMN branch_id INTEGER REFERENCES branches(id)`); } catch(e) {}
   // Add branch_id to products
   try { db.exec(`ALTER TABLE products ADD COLUMN branch_id INTEGER REFERENCES branches(id)`); } catch(e) {}
+  // Add description to products (for older DBs created before this column existed)
+  try { db.exec(`ALTER TABLE products ADD COLUMN description TEXT`); } catch(e) {}
   // Add branch_id to expenses
   try { db.exec(`ALTER TABLE expenses ADD COLUMN branch_id INTEGER REFERENCES branches(id)`); } catch(e) {}
   // Add branch_id to banking_transactions
   try { db.exec(`ALTER TABLE banking_transactions ADD COLUMN branch_id INTEGER REFERENCES branches(id)`); } catch(e) {}
   // Add branch_id to customers
   try { db.exec(`ALTER TABLE customers ADD COLUMN branch_id INTEGER REFERENCES branches(id)`); } catch(e) {}
+  // Purchase return resolution metadata (for refund/replacement workflow)
+  try { db.exec(`ALTER TABLE purchase_returns ADD COLUMN resolution_type TEXT`); } catch(e) {}
+  try { db.exec(`ALTER TABLE purchase_returns ADD COLUMN resolution_notes TEXT`); } catch(e) {}
+  try { db.exec(`ALTER TABLE purchase_returns ADD COLUMN resolved_at TEXT`); } catch(e) {}
   // Add code and contact to branches
   try { db.exec(`ALTER TABLE branches ADD COLUMN code TEXT`); } catch(e) {}
   try { db.exec(`ALTER TABLE branches ADD COLUMN contact TEXT`); } catch(e) {}

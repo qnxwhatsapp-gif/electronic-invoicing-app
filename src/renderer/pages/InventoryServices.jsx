@@ -206,9 +206,15 @@ export default function InventoryServices() {
   }, []);
 
   function loadAll() {
-    window.electron.invoke('products:getAll', { search, category: catFilter === 'All Categories' ? null : catFilter, status: statusFilter === 'All Status' ? null : statusFilter, branch_id: selectedBranch || undefined })
+    const filters = {
+      search,
+      category: catFilter === 'All Categories' ? null : catFilter,
+      status: statusFilter === 'All Status' ? null : statusFilter,
+      branch_id: selectedBranch || undefined,
+    };
+    window.electron.invoke('products:getAll', filters)
       .then(data => setProducts(Array.isArray(data) ? data : []));
-    window.electron.invoke('products:getInventoryStats', {})
+    window.electron.invoke('products:getInventoryStats', filters)
       .then(data => setStats(data || {}));
     window.electron.invoke('categories:getAll', {})
       .then(data => setCategories(Array.isArray(data) ? data : []));

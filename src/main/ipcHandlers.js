@@ -276,6 +276,14 @@ module.exports = function registerHandlers({ getDb }) {
     return db.prepare(`SELECT * FROM return_exchange ORDER BY date DESC`).all();
   });
 
+  ipcMain.handle('returns:getById', async (_, { id }) => {
+    const db = getDb();
+    const row = db.prepare(`SELECT * FROM return_exchange WHERE id = ?`).get(id);
+    if (!row) return null;
+    row.items = db.prepare(`SELECT * FROM return_exchange_items WHERE return_id = ? ORDER BY id ASC`).all(id);
+    return row;
+  });
+
   ipcMain.handle('returns:getEligibleInvoices', async () => {
     const db = getDb();
     return db.prepare(`
@@ -306,36 +314,113 @@ module.exports = function registerHandlers({ getDb }) {
     }
     const soldQty = db.prepare(`SELECT COALESCE(SUM(qty),0) as v FROM invoice_items WHERE invoice_id = ?`).get(data.original_invoice_id)?.v || Number(data.total_items_sold || 0);
     const prevReturnedQty = db.prepare(`SELECT COALESCE(SUM(items_returned),0) as v FROM return_exchange WHERE original_invoice_id = ?`).get(data.original_invoice_id)?.v || 0;
-    const currentReturnedQty = Number(data.items_returned || 0);
+    const returnItems = Array.isArray(data.items) ? data.items.filter(it => Number(it.returned_qty || 0) > 0) : [];
+    const exchangeItems = Array.isArray(data.exchange_items) ? data.exchange_items.filter(it => Number(it.qty || 0) > 0) : [];
+    const currentReturnedQty = returnItems.reduce((s, it) => s + Number(it.returned_qty || 0), 0);
+    const returnAmount = returnItems.reduce((s, it) => s + (Number(it.returned_qty || 0) * Number(it.rate || 0)), 0);
+    const exchangeAmount = exchangeItems.reduce((s, it) => s + (Number(it.qty || 0) * Number(it.rate || 0)), 0);
     if (currentReturnedQty <= 0) return { success: false, error: 'No return quantity selected' };
     if ((prevReturnedQty + currentReturnedQty) > soldQty) {
       return { success: false, error: 'Return quantity exceeds sold quantity for this invoice' };
     }
-    const computedStatus = (prevReturnedQty + currentReturnedQty) >= soldQty ? 'Completed' : 'Partial';
-
-    const ins = db.prepare(`INSERT INTO return_exchange (original_invoice_id, invoice_no, customer_name, type, total_items_sold, items_returned, return_amount, exchange_amount, net_amount, status, created_by) VALUES (@original_invoice_id,@invoice_no,@customer_name,@type,@total_items_sold,@items_returned,@return_amount,@exchange_amount,@net_amount,@status,@created_by)`);
-    const payload = {
-      ...data,
-      total_items_sold: soldQty,
-      status: computedStatus,
-    };
-    const r = ins.run(payload);
-    // restore stock for returned items
-    if (data.items) {
-      const upd = db.prepare(`UPDATE products SET current_stock = current_stock + ? WHERE id = ?`);
-      for (const item of data.items) if (item.returned_qty > 0) upd.run(item.returned_qty, item.product_id);
+    if (String(data.type || 'Return') === 'Exchange' && exchangeItems.length === 0) {
+      return { success: false, error: 'Select at least one exchange item' };
     }
-    return { success: true, id: r.lastInsertRowid };
+
+    // Per-product validation: prevent returning more than sold for each SKU.
+    for (const item of returnItems) {
+      const soldForProduct = db.prepare(`SELECT COALESCE(SUM(qty),0) as v FROM invoice_items WHERE invoice_id = ? AND product_id = ?`).get(data.original_invoice_id, item.product_id)?.v || 0;
+      const prevReturnedForProduct = db.prepare(`
+        SELECT COALESCE(SUM(rei.returned_qty),0) as v
+        FROM return_exchange_items rei
+        JOIN return_exchange re ON re.id = rei.return_id
+        WHERE re.original_invoice_id = ? AND rei.product_id = ?
+      `).get(data.original_invoice_id, item.product_id)?.v || 0;
+      if ((prevReturnedForProduct + Number(item.returned_qty || 0)) > soldForProduct) {
+        return { success: false, error: `Return qty exceeds sold qty for product ${item.product_name || item.product_id}` };
+      }
+    }
+
+    // Validate stock for exchange items.
+    for (const ex of exchangeItems) {
+      const p = db.prepare(`SELECT current_stock, name FROM products WHERE id = ?`).get(ex.product_id);
+      if (!p) return { success: false, error: `Exchange product not found: ${ex.product_id}` };
+      if (Number(p.current_stock || 0) < Number(ex.qty || 0)) {
+        return { success: false, error: `Insufficient stock for ${p.name}` };
+      }
+    }
+
+    const computedStatus = (prevReturnedQty + currentReturnedQty) >= soldQty ? 'Completed' : 'Partial';
+    const netAmount = exchangeAmount - returnAmount; // +ve customer pays more, -ve refund owed.
+
+    const tx = db.transaction(() => {
+      const ins = db.prepare(`INSERT INTO return_exchange (original_invoice_id, invoice_no, customer_name, type, total_items_sold, items_returned, return_amount, exchange_amount, net_amount, status, created_by) VALUES (@original_invoice_id,@invoice_no,@customer_name,@type,@total_items_sold,@items_returned,@return_amount,@exchange_amount,@net_amount,@status,@created_by)`);
+      const payload = {
+        ...data,
+        total_items_sold: soldQty,
+        items_returned: currentReturnedQty,
+        return_amount: returnAmount,
+        exchange_amount: exchangeAmount,
+        net_amount: netAmount,
+        status: computedStatus,
+      };
+      const r = ins.run(payload);
+      const returnId = r.lastInsertRowid;
+
+      const insItem = db.prepare(`INSERT INTO return_exchange_items (return_id, product_id, product_name, returned_qty, exchange_qty, rate) VALUES (?,?,?,?,?,?)`);
+      const updStockIn = db.prepare(`UPDATE products SET current_stock = current_stock + ? WHERE id = ?`);
+      const updStockOut = db.prepare(`UPDATE products SET current_stock = current_stock - ? WHERE id = ?`);
+
+      for (const item of returnItems) {
+        insItem.run(returnId, item.product_id, item.product_name || item.name || '', Number(item.returned_qty || 0), 0, Number(item.rate || 0));
+        updStockIn.run(Number(item.returned_qty || 0), item.product_id);
+      }
+      for (const ex of exchangeItems) {
+        insItem.run(returnId, ex.product_id, ex.product_name || ex.name || '', 0, Number(ex.qty || 0), Number(ex.rate || 0));
+        updStockOut.run(Number(ex.qty || 0), ex.product_id);
+      }
+
+      // Accounting impact: cash/bank movement by net difference.
+      if (netAmount !== 0) {
+        const year2 = new Date().getFullYear().toString().slice(-2);
+        const lastTxn = db.prepare(`SELECT txn_id FROM banking_transactions ORDER BY id DESC LIMIT 1`).get();
+        let txnSeq = 1;
+        if (lastTxn) {
+          const n = parseInt(String(lastTxn.txn_id || '').replace(`TXN-${year2}`, ''), 10);
+          txnSeq = isNaN(n) ? 1 : n + 1;
+        }
+        const txnId = `TXN-${year2}${String(txnSeq).padStart(3,'0')}`;
+        const acct = db.prepare(`SELECT id, account_name FROM accounts WHERE account_type='Cash' AND is_primary=1 LIMIT 1`).get()
+          || db.prepare(`SELECT id, account_name FROM accounts WHERE account_type='Cash' LIMIT 1`).get();
+        if (acct) {
+          const isCustomerPayingMore = netAmount > 0;
+          const movementType = isCustomerPayingMore ? 'Credit' : 'Debit';
+          const movementAmount = Math.abs(netAmount);
+          const movementDesc = isCustomerPayingMore
+            ? `Exchange Difference Received: ${data.invoice_no || data.original_invoice_id}`
+            : `Return Refund Paid: ${data.invoice_no || data.original_invoice_id}`;
+          db.prepare(`INSERT INTO banking_transactions (txn_id,account_id,account_name,date,description,type,amount) VALUES (?,?,?,?,?,?,?)`)
+            .run(txnId, acct.id, acct.account_name || 'Cash Account', new Date().toISOString().slice(0,10), movementDesc, movementType, movementAmount);
+          const delta = isCustomerPayingMore ? movementAmount : -movementAmount;
+          db.prepare(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ?`).run(delta, acct.id);
+        }
+      }
+      return returnId;
+    });
+
+    const returnId = tx();
+    return { success: true, id: returnId };
   });
 
   // ─── INVENTORY / PRODUCTS ─────────────────────────────────────────────────
-  ipcMain.handle('products:getAll', async (_, { search, category, status } = {}) => {
+  ipcMain.handle('products:getAll', async (_, { search, category, status, branch_id } = {}) => {
     const db = getDb();
     let q = `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON c.id = p.category_id WHERE p.is_active = 1`;
     const params = [];
     if (search) { q += ` AND (p.name LIKE ? OR p.sku LIKE ?)`; const s = `%${search}%`; params.push(s, s); }
     if (category && category !== 'All Categories') { q += ` AND c.name = ?`; params.push(category); }
     if (status && status !== 'All Status') { q += ` AND p.status = ?`; params.push(status); }
+    if (branch_id) { q += ` AND p.branch_id = ?`; params.push(branch_id); }
     return db.prepare(q).all(...params);
   });
 
@@ -353,16 +438,16 @@ module.exports = function registerHandlers({ getDb }) {
     const sku = `ITM-${String(seq).padStart(3, '0')}`;
     const initStock = data.current_stock || data.opening_stock || 0;
     const reorderLvl = data.low_stock_threshold || data.reorder_level || 10;
-    db.prepare(`INSERT INTO products (sku, name, category_id, unit, hsn_code, purchase_price, selling_price, opening_stock, current_stock, reorder_level, barcode, description) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(sku, data.name, data.category_id || null, data.unit || 'pcs', data.hsn_code || '', data.purchase_price || 0, data.selling_price || 0, initStock, initStock, reorderLvl, data.barcode || '', data.description || '');
+    db.prepare(`INSERT INTO products (sku, name, category_id, unit, hsn_code, purchase_price, selling_price, opening_stock, current_stock, reorder_level, barcode, description, branch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(sku, data.name, data.category_id || null, data.unit || 'pcs', data.hsn_code || '', data.purchase_price || 0, data.selling_price || 0, initStock, initStock, reorderLvl, data.barcode || '', data.description || '', data.branch_id || null);
     return { success: true, sku };
   });
 
   ipcMain.handle('products:update', async (_, { id, ...data }) => {
     const db = getDb();
     const reorderLvl = data.low_stock_threshold || data.reorder_level || 10;
-    db.prepare(`UPDATE products SET name=?,category_id=?,unit=?,hsn_code=?,purchase_price=?,selling_price=?,current_stock=?,reorder_level=?,barcode=?,description=? WHERE id=?`)
-      .run(data.name, data.category_id || null, data.unit || 'pcs', data.hsn_code || '', data.purchase_price || 0, data.selling_price || 0, data.current_stock || 0, reorderLvl, data.barcode || '', data.description || '', id);
+    db.prepare(`UPDATE products SET name=?,category_id=?,unit=?,hsn_code=?,purchase_price=?,selling_price=?,current_stock=?,reorder_level=?,barcode=?,description=?,branch_id=? WHERE id=?`)
+      .run(data.name, data.category_id || null, data.unit || 'pcs', data.hsn_code || '', data.purchase_price || 0, data.selling_price || 0, data.current_stock || 0, reorderLvl, data.barcode || '', data.description || '', data.branch_id || null, id);
     return { success: true };
   });
 
@@ -378,12 +463,18 @@ module.exports = function registerHandlers({ getDb }) {
     return db.prepare(`SELECT * FROM customers ORDER BY name`).all();
   });
 
-  ipcMain.handle('products:getInventoryStats', async () => {
+  ipcMain.handle('products:getInventoryStats', async (_, { category, status, branch_id } = {}) => {
     const db = getDb();
-    const total = db.prepare(`SELECT COUNT(*) as val FROM products WHERE is_active=1`).get().val;
-    const lowAlert = db.prepare(`SELECT COUNT(*) as val FROM products WHERE status IN ('Low','Critical') AND is_active=1`).get().val;
-    const costVal = db.prepare(`SELECT COALESCE(SUM(current_stock*purchase_price),0) as val FROM products WHERE is_active=1`).get().val;
-    const sellVal = db.prepare(`SELECT COALESCE(SUM(current_stock*selling_price),0) as val FROM products WHERE is_active=1`).get().val;
+    let where = ` WHERE p.is_active=1`;
+    const params = [];
+    if (category && category !== 'All Categories') { where += ` AND c.name = ?`; params.push(category); }
+    if (status && status !== 'All Status') { where += ` AND p.status = ?`; params.push(status); }
+    if (branch_id) { where += ` AND p.branch_id = ?`; params.push(branch_id); }
+
+    const total = db.prepare(`SELECT COUNT(*) as val FROM products p LEFT JOIN categories c ON c.id = p.category_id ${where}`).get(...params).val;
+    const lowAlert = db.prepare(`SELECT COUNT(*) as val FROM products p LEFT JOIN categories c ON c.id = p.category_id ${where} AND p.status IN ('Low','Critical')`).get(...params).val;
+    const costVal = db.prepare(`SELECT COALESCE(SUM(p.current_stock*p.purchase_price),0) as val FROM products p LEFT JOIN categories c ON c.id = p.category_id ${where}`).get(...params).val;
+    const sellVal = db.prepare(`SELECT COALESCE(SUM(p.current_stock*p.selling_price),0) as val FROM products p LEFT JOIN categories c ON c.id = p.category_id ${where}`).get(...params).val;
     return { total, lowAlert, costVal, sellVal };
   });
 
@@ -520,6 +611,69 @@ module.exports = function registerHandlers({ getDb }) {
   });
   ipcMain.handle('purchases:getReturns', async () => {
     return getDb().prepare(`SELECT pr.*, v.vendor_name as vname FROM purchase_returns pr LEFT JOIN vendors v ON v.id=pr.vendor_id ORDER BY pr.order_date DESC`).all();
+  });
+  ipcMain.handle('purchases:updateReturnStatus', async (_, { id, resolution_type, notes } = {}) => {
+    const db = getDb();
+    const ret = db.prepare(`SELECT * FROM purchase_returns WHERE id = ?`).get(id);
+    if (!ret) return { success: false, error: 'Return not found' };
+    if (ret.status === 'Completed') return { success: false, error: 'Return already resolved' };
+    if (!['refund', 'replacement'].includes(String(resolution_type || '').toLowerCase())) {
+      return { success: false, error: 'Invalid resolution type' };
+    }
+
+    const items = db.prepare(`SELECT * FROM purchase_return_items WHERE purchase_return_id = ?`).all(id);
+    const mode = String(resolution_type).toLowerCase();
+
+    const tx = db.transaction(() => {
+      if (mode === 'replacement') {
+        // Vendor sends same items again: restore stock to reverse the prior return-out.
+        const updStock = db.prepare(`
+          UPDATE products
+          SET current_stock = current_stock + ?,
+              status = CASE
+                WHEN current_stock + ? <= 5 THEN 'Critical'
+                WHEN current_stock + ? <= reorder_level THEN 'Low'
+                ELSE 'Good'
+              END
+          WHERE id = ?
+        `);
+        for (const item of items) {
+          const qty = Number(item.return_qty || 0);
+          if (qty > 0) updStock.run(qty, qty, qty, item.product_id);
+        }
+      } else if (mode === 'refund') {
+        const refundAmount = Number(ret.return_total || 0);
+        if (refundAmount > 0) {
+          const year2 = new Date().getFullYear().toString().slice(-2);
+          const lastTxn = db.prepare(`SELECT txn_id FROM banking_transactions ORDER BY id DESC LIMIT 1`).get();
+          let txnSeq = 1;
+          if (lastTxn) {
+            const n = parseInt(String(lastTxn.txn_id || '').replace(`TXN-${year2}`, ''), 10);
+            txnSeq = isNaN(n) ? 1 : n + 1;
+          }
+          const txnId = `TXN-${year2}${String(txnSeq).padStart(3,'0')}`;
+          const acct = db.prepare(`SELECT id, account_name FROM accounts WHERE account_type='Cash' AND is_primary=1 LIMIT 1`).get()
+            || db.prepare(`SELECT id, account_name FROM accounts WHERE account_type='Cash' LIMIT 1`).get();
+          if (acct) {
+            db.prepare(`INSERT INTO banking_transactions (txn_id,account_id,account_name,date,description,type,amount) VALUES (?,?,?,?,?,?,?)`)
+              .run(txnId, acct.id, acct.account_name || 'Cash Account', new Date().toISOString().slice(0,10), `Vendor Refund: ${ret.po_number || ret.id}`, 'Credit', refundAmount);
+            db.prepare(`UPDATE accounts SET current_balance = current_balance + ? WHERE id = ?`).run(refundAmount, acct.id);
+          }
+        }
+      }
+
+      db.prepare(`
+        UPDATE purchase_returns
+        SET status = 'Completed',
+            resolution_type = ?,
+            resolution_notes = ?,
+            resolved_at = datetime('now')
+        WHERE id = ?
+      `).run(mode, notes || '', id);
+    });
+
+    tx();
+    return { success: true };
   });
 
   ipcMain.handle('purchases:getItems', async (_, { id }) => {
